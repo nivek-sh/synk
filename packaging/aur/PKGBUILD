@@ -8,6 +8,7 @@ url='https://github.com/nivek-sh/synk'
 license=('MIT')
 depends=('bitwarden-cli' 'openssh')
 makedepends=('go')
+options=('!debug')
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
