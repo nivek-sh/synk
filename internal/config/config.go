@@ -17,6 +17,11 @@ type Config struct {
 	ManagedConfigPath string   `toml:"managed_config_path"`
 	BWPath            string   `toml:"bw_path"`
 	AutoSync          bool     `toml:"auto_sync"`
+	ProfileEditor     Editor   `toml:"profile_editor"`
+}
+
+type Editor struct {
+	Refresh string `toml:"refresh"`
 }
 
 func Default() Config {
@@ -25,6 +30,9 @@ func Default() Config {
 		ManagedConfigPath: "~/.ssh/config.d/synk.conf",
 		BWPath:            "bw",
 		AutoSync:          false,
+		ProfileEditor: Editor{
+			Refresh: "auto",
+		},
 	}
 }
 
@@ -90,6 +98,12 @@ func (c *Config) Normalize() {
 	}
 	if c.BWPath == "" {
 		c.BWPath = Default().BWPath
+	}
+	switch strings.ToLower(strings.TrimSpace(c.ProfileEditor.Refresh)) {
+	case "auto", "manual", "never":
+		c.ProfileEditor.Refresh = strings.ToLower(strings.TrimSpace(c.ProfileEditor.Refresh))
+	default:
+		c.ProfileEditor.Refresh = Default().ProfileEditor.Refresh
 	}
 	c.ActiveProfiles = NormalizeProfiles(c.ActiveProfiles)
 }

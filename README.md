@@ -68,16 +68,24 @@ Use `Profiles`, plural, for profile assignment. `Profile` is not supported.
 synk init
 synk doctor
 synk profile status
+synk profile diff
+synk profile diff --sync
 synk profile edit
+synk profile edit --local
+synk profile edit --refresh manual
+synk profile edit --no-sync
 synk profile move pro before nk
 synk profile move pro down
 synk profile add pro
 synk profile remove pro
 synk profile show
 synk profile set general,nk,pro
+synk cache refresh
+synk cache refresh --no-sync
 synk apply --dry-run
 synk apply --sync
 synk list
+synk list --sync
 ```
 
 `synk init` creates `~/.config/synk/config.toml`, installs an idempotent
@@ -89,6 +97,14 @@ By default, `synk apply` writes:
 - `~/.ssh/config.d/synk.conf`
 
 Use `--stdout` or `--dry-run` to print without writing.
+
+Use `--sync` on commands that read Bitwarden when you want to force `bw sync`
+before reading items, for example `synk list --sync`, `synk apply --sync`,
+`synk profile status --sync`, or `synk profile diff --sync`.
+
+`synk cache refresh` always runs `bw sync` before reading items because the
+cache is meant to represent fresh Bitwarden metadata. Use
+`synk cache refresh --no-sync` only when you explicitly want to skip syncing.
 
 `synk` never writes private keys or public keys. If you need `IdentityFile`, add
 it explicitly as a Bitwarden custom field.
@@ -128,11 +144,63 @@ Use the interactive editor when you do not want to type the full profile list:
 synk profile edit
 ```
 
+The editor opens immediately from `config.toml` plus the local profile cache,
+then starts a detached background cache refresh. When fresh host/profile
+metadata is ready, the editor updates discovered profiles and override colors
+without resetting your current cursor, order, or enabled profiles. If you leave
+the editor before the refresh finishes, the detached refresh can still complete
+and update the cache for the next run.
+
+The profile cache stores only metadata needed by the editor: `Host`, `Profile`,
+and source item name. It does not store SSH directives, keys, passwords, notes,
+or raw Bitwarden JSON.
+
+Refresh behavior is configured in `~/.config/synk/config.toml`:
+
+```toml
+[profile_editor]
+refresh = "auto"
+```
+
+Supported values:
+
+- `auto`: check Bitwarden in the UI, open `bw unlock --raw` automatically if
+  the vault is locked, then start a detached cache refresh.
+- `manual`: check Bitwarden in the UI; if the vault is locked, press `u` inside
+  the editor to unlock and start the detached refresh.
+- `never`: never contact Bitwarden from the editor; use the local cache only.
+
+Override the config per run:
+
+```sh
+synk profile edit --refresh manual
+synk profile edit --refresh never
+```
+
+For a fast local-only editor, use the shorthand:
+
+```sh
+synk profile edit --local
+```
+
+Refresh the cache manually:
+
+```sh
+synk cache refresh
+```
+
+The editor uses the same command with `--background` for detached refreshes.
+Background refreshes never prompt directly; the editor handles unlock prompts
+before launching them. Editor refreshes sync Bitwarden by default; use
+`synk profile edit --no-sync` to skip sync for that background refresh.
+
 Inside the editor:
 
 - `j/k` or arrow keys move the cursor.
 - `J/K` move the selected profile down/up.
 - `space` enables or disables a discovered profile.
+- `r` refreshes Bitwarden.
+- `u` unlocks Bitwarden and refreshes.
 - `enter` saves.
 - `q` cancels.
 
@@ -143,6 +211,24 @@ terminal supports ANSI colors:
 - yellow: some hosts are overridden.
 - red: every host in that profile is overridden.
 - dim: profile has no active hosts or is inactive.
+
+The editor and `synk profile status` keep the `OVERRIDE` column compact with
+counts only. Use `synk profile diff` when you want to inspect the effective
+config with override markers:
+
+```sh
+synk profile diff
+```
+
+`profile diff` renders OpenSSH-style `Host` blocks in the same order as the
+managed config:
+
+- `=` marks a block that is kept and has no competing profile.
+- `+` marks the winning block for a `Host` that overrides earlier profiles.
+- `-` marks blocks that are discarded because a later profile wins.
+
+Use `--sync` to force `bw sync` before reading Bitwarden, or `--no-color` for
+plain output.
 
 For scripts or quick edits, move one profile at a time:
 
@@ -163,8 +249,8 @@ recommended workflow once you have many profiles.
 ```sh
 nix develop
 synk --help
-go test ./...
-go vet ./...
+go test ./cmd/... ./internal/...
+go vet ./cmd/... ./internal/...
 nix flake check
 ```
 

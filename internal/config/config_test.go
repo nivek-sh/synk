@@ -45,6 +45,24 @@ func TestSaveLoadConfig(t *testing.T) {
 	if !loaded.AutoSync {
 		t.Fatal("AutoSync = false")
 	}
+	if loaded.ProfileEditor.Refresh != "auto" {
+		t.Fatalf("ProfileEditor.Refresh = %q", loaded.ProfileEditor.Refresh)
+	}
+}
+
+func TestNormalizeProfileEditorRefresh(t *testing.T) {
+	cfg := Default()
+	cfg.ProfileEditor.Refresh = "MANUAL"
+	cfg.Normalize()
+	if cfg.ProfileEditor.Refresh != "manual" {
+		t.Fatalf("ProfileEditor.Refresh = %q", cfg.ProfileEditor.Refresh)
+	}
+
+	cfg.ProfileEditor.Refresh = "surprise"
+	cfg.Normalize()
+	if cfg.ProfileEditor.Refresh != "auto" {
+		t.Fatalf("ProfileEditor.Refresh = %q", cfg.ProfileEditor.Refresh)
+	}
 }
 
 func TestLoadExpandsTildePath(t *testing.T) {

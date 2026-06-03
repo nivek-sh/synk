@@ -32,35 +32,45 @@ func Render(entries []Entry, activeProfiles []string) string {
 	out.WriteString("\n")
 
 	for _, entry := range entries {
-		out.WriteString(fmt.Sprintf("# Profile: %s", entry.Profile))
-		if entry.Source != "" {
-			out.WriteString(fmt.Sprintf(" | Source: %s", entry.Source))
-		}
-		out.WriteString("\n")
-		out.WriteString("Host ")
-		out.WriteString(entry.Host)
-		out.WriteString("\n")
-		for _, note := range commentLines(entry.Notes) {
-			out.WriteString("    # ")
-			out.WriteString(note)
-			out.WriteString("\n")
-		}
-
-		for _, key := range orderedDirectiveKeys(entry.Directives) {
-			value := strings.TrimSpace(entry.Directives[key])
-			if value == "" {
-				continue
-			}
-			out.WriteString("    ")
-			out.WriteString(key)
-			out.WriteString(" ")
-			out.WriteString(value)
-			out.WriteString("\n")
-		}
+		writeEntryBlock(&out, entry)
 		out.WriteString("\n")
 	}
 
 	return out.String()
+}
+
+func RenderEntryBlock(entry Entry) string {
+	var out strings.Builder
+	writeEntryBlock(&out, entry)
+	return strings.TrimRight(out.String(), "\n")
+}
+
+func writeEntryBlock(out *strings.Builder, entry Entry) {
+	out.WriteString(fmt.Sprintf("# Profile: %s", entry.Profile))
+	if entry.Source != "" {
+		out.WriteString(fmt.Sprintf(" | Source: %s", entry.Source))
+	}
+	out.WriteString("\n")
+	out.WriteString("Host ")
+	out.WriteString(entry.Host)
+	out.WriteString("\n")
+	for _, note := range commentLines(entry.Notes) {
+		out.WriteString("    # ")
+		out.WriteString(note)
+		out.WriteString("\n")
+	}
+
+	for _, key := range orderedDirectiveKeys(entry.Directives) {
+		value := strings.TrimSpace(entry.Directives[key])
+		if value == "" {
+			continue
+		}
+		out.WriteString("    ")
+		out.WriteString(key)
+		out.WriteString(" ")
+		out.WriteString(value)
+		out.WriteString("\n")
+	}
 }
 
 func commentLines(notes string) []string {

@@ -2,20 +2,25 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"synk/internal/bitwarden"
 	"synk/internal/config"
+	"synk/internal/profilecache"
 	"synk/internal/sshconfig"
 )
 
 var Version = "dev"
+
+var errNeedsBitwardenUnlock = errors.New("Bitwarden vault is locked")
 
 type rootOptions struct {
 	configPath string
@@ -37,6 +42,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newApplyCommand(opts))
 	cmd.AddCommand(newListCommand(opts))
 	cmd.AddCommand(newProfileCommand(opts))
+	cmd.AddCommand(newCacheCommand(opts))
 
 	return cmd
 }
@@ -107,8 +113,13 @@ func newDoctorCommand(opts *rootOptions) *cobra.Command {
 					fmt.Fprintf(out, "fail bw status: %v\n", err)
 					failed = true
 				} else {
-					fmt.Fprintf(out, "ok   bw status: %s\n", status.Status)
-					if status.Status != "unlocked" {
+					switch status.Status {
+					case "unlocked":
+						fmt.Fprintf(out, "ok   bw status: %s\n", status.Status)
+					case "locked":
+						fmt.Fprintf(out, "warn bw status: %s (synk will unlock when needed)\n", status.Status)
+					default:
+						fmt.Fprintf(out, "fail bw status: %s\n", status.Status)
 						failed = true
 					}
 				}
@@ -171,7 +182,8 @@ func newApplyCommand(opts *rootOptions) *cobra.Command {
 }
 
 func newListCommand(opts *rootOptions) *cobra.Command {
-	return &cobra.Command{
+	var syncVault bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List effective SSH hosts from Bitwarden",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -179,7 +191,7 @@ func newListCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, warnings, err := fetchEntries(cmd.Context(), cfg, cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			entries, warnings, err := fetchEntries(cmd.Context(), cfg, syncVault || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -194,6 +206,8 @@ func newListCommand(opts *rootOptions) *cobra.Command {
 			return table.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&syncVault, "sync", false, "run bw sync before reading items")
+	return cmd
 }
 
 func newProfileCommand(opts *rootOptions) *cobra.Command {
@@ -317,7 +331,31 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 	statusCommand.Flags().BoolVar(&statusNoColor, "no-color", false, "disable ANSI colors")
 	cmd.AddCommand(statusCommand)
 
-	var editSync bool
+	var diffSync bool
+	var diffNoColor bool
+	diffCommand := &cobra.Command{
+		Use:   "diff",
+		Short: "Show the effective config with profile override markers",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			entries, err := fetchRawEntries(cmd.Context(), cfg, diffSync || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			return renderProfileDiff(cmd.OutOrStdout(), entries, cfg.ActiveProfiles, colorMode(shouldUseColor(cmd.OutOrStdout(), diffNoColor)))
+		},
+	}
+	diffCommand.Flags().BoolVar(&diffSync, "sync", false, "run bw sync before reading items")
+	diffCommand.Flags().BoolVar(&diffNoColor, "no-color", false, "disable ANSI colors")
+	cmd.AddCommand(diffCommand)
+
+	var editLocal bool
+	var editRefresh string
+	var editNoSync bool
 	editCommand := &cobra.Command{
 		Use:   "edit",
 		Short: "Interactively reorder and enable profiles",
@@ -331,11 +369,20 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, editSync || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			refreshMode := cfg.ProfileEditor.Refresh
+			if editRefresh != "" {
+				refreshMode = editRefresh
+			}
+			if editLocal {
+				refreshMode = editorRefreshNever
+			}
+			refreshMode = normalizeEditorRefresh(refreshMode)
+
+			cache, err := profilecache.Load("")
 			if err != nil {
 				return err
 			}
-			next, saved, err := runProfileEditor(cmd.InOrStdin(), cmd.OutOrStdout(), cfg.ActiveProfiles, entries)
+			next, saved, err := runProfileEditor(cmd.InOrStdin(), cmd.OutOrStdout(), cfg, cfgPath, cache.ToSSHEntries(), cache.UpdatedAt, refreshMode, !editNoSync)
 			if err != nil {
 				return err
 			}
@@ -351,10 +398,96 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			return nil
 		},
 	}
-	editCommand.Flags().BoolVar(&editSync, "sync", false, "run bw sync before reading items")
+	editCommand.Flags().StringVar(&editRefresh, "refresh", "", "profile editor refresh mode: auto, manual or never")
+	editCommand.Flags().BoolVar(&editLocal, "local", false, "use config and profile cache without refreshing Bitwarden")
+	editCommand.Flags().BoolVar(&editNoSync, "no-sync", false, "skip bw sync during background cache refresh")
 	cmd.AddCommand(editCommand)
 
 	return cmd
+}
+
+func newCacheCommand(opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Manage synk caches",
+	}
+
+	var noSync bool
+	var background bool
+	refreshCommand := &cobra.Command{
+		Use:   "refresh",
+		Short: "Refresh cached Bitwarden SSH host metadata",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			return refreshProfileCache(cmd.Context(), cfg, !noSync, background, cmd.InOrStdin(), cmd.ErrOrStderr(), cmd.OutOrStdout())
+		},
+	}
+	refreshCommand.Flags().BoolVar(&background, "background", false, "refresh without prompting and write cache status")
+	refreshCommand.Flags().BoolVar(&noSync, "no-sync", false, "skip bw sync before reading items")
+	cmd.AddCommand(refreshCommand)
+	return cmd
+}
+
+func refreshProfileCache(ctx context.Context, cfg config.Config, syncVault bool, background bool, in io.Reader, errOut io.Writer, out io.Writer) error {
+	startedAt := time.Now()
+	if background {
+		_ = profilecache.SaveStatus("", profilecache.Status{
+			State:     "running",
+			StartedAt: startedAt,
+			UpdatedAt: startedAt,
+		})
+	}
+
+	var entries []sshconfig.Entry
+	var err error
+	if background {
+		entries, err = fetchRawEntriesNoUnlock(ctx, cfg, syncVault)
+	} else {
+		entries, err = fetchRawEntries(ctx, cfg, syncVault, in, errOut)
+	}
+	if err != nil {
+		if background {
+			state := "error"
+			if errors.Is(err, errNeedsBitwardenUnlock) {
+				state = "locked"
+			}
+			_ = profilecache.SaveStatus("", profilecache.Status{
+				State:     state,
+				Message:   err.Error(),
+				StartedAt: startedAt,
+				UpdatedAt: time.Now(),
+			})
+		}
+		return err
+	}
+
+	cache, err := profilecache.Save("", entries)
+	if err != nil {
+		if background {
+			_ = profilecache.SaveStatus("", profilecache.Status{
+				State:     "error",
+				Message:   err.Error(),
+				StartedAt: startedAt,
+				UpdatedAt: time.Now(),
+			})
+		}
+		return err
+	}
+	if background {
+		_ = profilecache.SaveStatus("", profilecache.Status{
+			State:     "done",
+			Message:   fmt.Sprintf("cached %d host/profile entries", len(cache.Entries)),
+			StartedAt: startedAt,
+			UpdatedAt: cache.UpdatedAt,
+		})
+		return nil
+	}
+	fmt.Fprintf(out, "cached %d host/profile entries at %s\n", len(cache.Entries), cache.UpdatedAt.Format(time.RFC3339))
+	return nil
 }
 
 func updateProfiles(configPath string, mutate func(*config.Config), out io.Writer) error {
@@ -425,6 +558,40 @@ func fetchRawEntries(ctx context.Context, cfg config.Config, syncVault bool, in 
 		}
 	}
 	return fetchRawEntriesWithClient(ctx, client, syncVault)
+}
+
+func fetchRawEntriesNoUnlock(ctx context.Context, cfg config.Config, syncVault bool) ([]sshconfig.Entry, error) {
+	client := bitwarden.NewCLI(cfg.BWPath)
+	cache := bitwarden.DefaultSessionCache()
+	if session, err := cache.Load(); err != nil {
+		return nil, err
+	} else if session != "" {
+		client.Session = session
+	}
+
+	if client.Session == "" && strings.TrimSpace(os.Getenv("BW_SESSION")) == "" {
+		status, err := client.Status(ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch status.Status {
+		case "unlocked":
+		case "locked":
+			return nil, errNeedsBitwardenUnlock
+		default:
+			return nil, bitwarden.VaultLockedError{Status: status.Status}
+		}
+	}
+
+	entries, err := fetchRawEntriesWithClient(ctx, client, syncVault)
+	if err != nil {
+		if bitwarden.LooksLikeSessionError(err) {
+			_ = cache.Clear()
+			return nil, errNeedsBitwardenUnlock
+		}
+		return nil, err
+	}
+	return entries, nil
 }
 
 func fetchRawEntriesWithClient(ctx context.Context, client bitwarden.CLI, syncVault bool) ([]sshconfig.Entry, error) {

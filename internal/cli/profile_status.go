@@ -41,7 +41,7 @@ func renderProfileStatus(out io.Writer, entries []sshconfig.Entry, activeProfile
 		}
 		name := profileStatusColor(status, color)
 		summary := profileStatusSummary(status)
-		override := profileOverrideSummary(status)
+		override := profileOverrideCounts(status)
 		fmt.Fprintf(out, "%d\t%s\t%s\t%d\t%s\n", idx+1, name, summary, status.HostCount, override)
 	}
 }
@@ -63,18 +63,18 @@ func profileStatusSummary(status profileStatus) string {
 	}
 }
 
-func profileOverrideSummary(status profileStatus) string {
+func profileOverrideCounts(status profileStatus) string {
 	parts := []string{}
-	if len(status.OverriddenBy) > 0 {
-		parts = append(parts, "overridden by "+strings.Join(status.OverriddenBy, ","))
+	if status.OverriddenCount > 0 {
+		parts = append(parts, fmt.Sprintf("overridden %d/%d", status.OverriddenCount, status.HostCount))
 	}
-	if len(status.OverridesProfile) > 0 {
-		parts = append(parts, "overrides "+strings.Join(status.OverridesProfile, ","))
+	if status.OverridingCount > 0 {
+		parts = append(parts, fmt.Sprintf("overrides %d", status.OverridingCount))
 	}
 	if len(parts) == 0 {
 		return "-"
 	}
-	return strings.Join(parts, "; ")
+	return strings.Join(parts, ", ")
 }
 
 func profileStatusColor(status profileStatus, color colorMode) string {
