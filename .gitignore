@@ -1,0 +1,6 @@
+/synk
+/result
+/result-*
+/.direnv
+/.nix-dev
+/coverage.out

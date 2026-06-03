@@ -1,0 +1,13 @@
+build:
+    go build -buildvcs=false -o /tmp/synk ./cmd/synk
+
+test:
+    go test ./...
+
+vet:
+    go vet ./...
+
+check:
+    go test ./...
+    go vet ./...
+    nix flake check path:.
