@@ -191,6 +191,7 @@ func TestProfileStatusShowsOverrideState(t *testing.T) {
 func TestListAutoUnlocksWhenVaultIsLocked(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	t.Setenv("BW_SESSION", "stale-env-session")
 	bwPath := writeFakeBWLockedUnlockable(t, temp, `[
   {
     "type": 5,
@@ -232,6 +233,7 @@ func TestListAutoUnlocksWhenVaultIsLocked(t *testing.T) {
 func TestListReusesCachedSessionWithoutStatus(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	t.Setenv("BW_SESSION", "stale-env-session")
 	bwPath := writeFakeBWCacheAware(t, temp, `[
   {
     "type": 5,

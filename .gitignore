@@ -4,3 +4,10 @@
 /.direnv
 /.nix-dev
 /coverage.out
+
+# makepkg artifacts
+/packaging/aur/pkg/
+/packaging/aur/src/
+/packaging/aur/.SRCINFO
+/packaging/aur/*.tar.gz
+/packaging/aur/*.pkg.tar.*

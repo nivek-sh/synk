@@ -192,6 +192,7 @@ func LooksLikeSessionError(err error) bool {
 		strings.Contains(message, "locked") ||
 		strings.Contains(message, "master password") ||
 		strings.Contains(message, "empty output") ||
+		strings.Contains(message, "missing session") ||
 		strings.Contains(message, "bw_session")
 }
 
