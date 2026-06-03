@@ -1,10 +1,10 @@
-# Maintainer: Your Name <you@example.com>
+# Maintainer: NivekNK <79262770+NivekNK@users.noreply.github.com>
 pkgname=synk
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Generate OpenSSH config from Bitwarden profiles'
 arch=('x86_64' 'aarch64')
-url='https://github.com/REPLACE_ME/synk'
+url='https://github.com/nivek-sh/synk'
 license=('MIT')
 depends=('bitwarden-cli' 'openssh')
 makedepends=('go')
