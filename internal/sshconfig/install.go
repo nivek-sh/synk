@@ -17,6 +17,13 @@ type InstallResult struct {
 	Changed       bool
 }
 
+type RemoveResult struct {
+	SSHConfigPath string
+	IncludeLine   string
+	BackupPath    string
+	Changed       bool
+}
+
 func DefaultUserConfigPath() string {
 	return "~/.ssh/config"
 }
@@ -52,7 +59,7 @@ func InstallInclude(userConfigPath, managedConfigPath string) (InstallResult, er
 	}
 
 	if len(existing) > 0 {
-		backupPath := expandedUserConfig + ".synk." + time.Now().Format("20060102150405") + ".bak"
+		backupPath := nextBackupPath(expandedUserConfig)
 		if err := os.WriteFile(backupPath, existing, 0o600); err != nil {
 			return InstallResult{}, fmt.Errorf("backup ssh config: %w", err)
 		}
@@ -77,6 +84,78 @@ func InstallInclude(userConfigPath, managedConfigPath string) (InstallResult, er
 	return result, nil
 }
 
+func HasInclude(userConfigPath, managedConfigPath string) (bool, error) {
+	if userConfigPath == "" {
+		userConfigPath = DefaultUserConfigPath()
+	}
+	if managedConfigPath == "" {
+		managedConfigPath = "~/.ssh/config.d/synk.conf"
+	}
+	expanded, err := config.ExpandPath(userConfigPath)
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(expanded)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return containsLine(string(data), "Include "+managedConfigPath), nil
+}
+
+func RemoveInclude(userConfigPath, managedConfigPath string) (RemoveResult, error) {
+	if userConfigPath == "" {
+		userConfigPath = DefaultUserConfigPath()
+	}
+	if managedConfigPath == "" {
+		managedConfigPath = "~/.ssh/config.d/synk.conf"
+	}
+	expanded, err := config.ExpandPath(userConfigPath)
+	if err != nil {
+		return RemoveResult{}, err
+	}
+	includeLine := "Include " + managedConfigPath
+	result := RemoveResult{SSHConfigPath: expanded, IncludeLine: includeLine}
+	existing, err := os.ReadFile(expanded)
+	if os.IsNotExist(err) {
+		return result, nil
+	}
+	if err != nil {
+		return RemoveResult{}, err
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	nextLines := make([]string, 0, len(lines))
+	removed := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == includeLine {
+			removed = true
+			continue
+		}
+		nextLines = append(nextLines, line)
+	}
+	if !removed {
+		return result, nil
+	}
+	if len(nextLines) > 1 && nextLines[0] == "" {
+		nextLines = nextLines[1:]
+	}
+	next := strings.Join(nextLines, "\n")
+
+	backupPath := nextBackupPath(expanded)
+	if err := os.WriteFile(backupPath, existing, 0o600); err != nil {
+		return RemoveResult{}, fmt.Errorf("backup ssh config: %w", err)
+	}
+	if err := atomicWrite(expanded, []byte(next), 0o600); err != nil {
+		return RemoveResult{}, err
+	}
+	result.BackupPath = backupPath
+	result.Changed = true
+	return result, nil
+}
+
 func WriteManagedConfig(path string, content string) error {
 	expanded, err := config.ExpandPath(path)
 	if err != nil {
@@ -92,4 +171,8 @@ func containsLine(content, line string) bool {
 		}
 	}
 	return false
+}
+
+func nextBackupPath(path string) string {
+	return path + ".synk." + time.Now().Format("20060102150405.000000000") + ".bak"
 }

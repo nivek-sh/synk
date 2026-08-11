@@ -55,6 +55,32 @@ func TestExtractSSHEntriesMapsCustomFields(t *testing.T) {
 	}
 }
 
+func TestExtractSSHEntriesCarriesNativePublicKeyMetadata(t *testing.T) {
+	items := []Item{{
+		ID:   "item-123",
+		Name: "Cloud",
+		Type: SSHKeyItemType,
+		SSHKey: &SSHKey{
+			PublicKey:      "ssh-ed25519 AAAA cloud",
+			KeyFingerprint: "SHA256:test",
+		},
+		Fields: []Field{
+			{Name: "Enabled", Value: "true"},
+			{Name: "HostName", Value: "cloud.example.com"},
+			{Name: "User", Value: "deploy"},
+		},
+	}}
+
+	entries, err := ExtractSSHEntries(items)
+	if err != nil {
+		t.Fatalf("ExtractSSHEntries() error = %v", err)
+	}
+	entry := entries[0]
+	if entry.SourceID != "item-123" || entry.PublicKey != "ssh-ed25519 AAAA cloud" || entry.KeyFingerprint != "SHA256:test" {
+		t.Fatalf("entry metadata = %#v", entry)
+	}
+}
+
 func TestExtractSSHEntriesRequiresUser(t *testing.T) {
 	items := []Item{
 		{

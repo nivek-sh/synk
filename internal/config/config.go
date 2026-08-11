@@ -15,8 +15,9 @@ const DefaultProfile = "general"
 type Config struct {
 	ActiveProfiles    []string `toml:"active_profiles"`
 	ManagedConfigPath string   `toml:"managed_config_path"`
+	ManagedKeysPath   string   `toml:"managed_keys_path"`
 	BWPath            string   `toml:"bw_path"`
-	AutoSync          bool     `toml:"auto_sync"`
+	AutoSync          bool     `toml:"auto_sync"` // Deprecated: fresh remote-state commands always sync.
 	ProfileEditor     Editor   `toml:"profile_editor"`
 }
 
@@ -28,6 +29,7 @@ func Default() Config {
 	return Config{
 		ActiveProfiles:    []string{DefaultProfile},
 		ManagedConfigPath: "~/.ssh/config.d/synk.conf",
+		ManagedKeysPath:   "~/.ssh/config.d/synk.keys",
 		BWPath:            "bw",
 		AutoSync:          false,
 		ProfileEditor: Editor{
@@ -95,6 +97,9 @@ func Save(path string, cfg Config) error {
 func (c *Config) Normalize() {
 	if c.ManagedConfigPath == "" {
 		c.ManagedConfigPath = Default().ManagedConfigPath
+	}
+	if c.ManagedKeysPath == "" {
+		c.ManagedKeysPath = Default().ManagedKeysPath
 	}
 	if c.BWPath == "" {
 		c.BWPath = Default().BWPath

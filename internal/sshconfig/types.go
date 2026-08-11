@@ -1,11 +1,14 @@
 package sshconfig
 
 type Entry struct {
-	Host       string
-	Profile    string
-	Source     string
-	Notes      string
-	Directives map[string]string
+	Host           string
+	Profile        string
+	Source         string
+	SourceID       string
+	Notes          string
+	PublicKey      string
+	KeyFingerprint string
+	Directives     map[string]string
 }
 
 func (e Entry) Clone() Entry {

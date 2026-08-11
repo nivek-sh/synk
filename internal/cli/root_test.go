@@ -69,8 +69,11 @@ func TestApplyStdoutUsesFakeBW(t *testing.T) {
 	if strings.Contains(output, "id_general") {
 		t.Fatalf("general identity should be overridden:\n%s", output)
 	}
-	if strings.Contains(output, "IdentityFile") {
-		t.Fatalf("IdentityFile should only render when explicitly configured:\n%s", output)
+	if !strings.Contains(output, "IdentityFile ~/.ssh/config.d/synk.keys/bw-") {
+		t.Fatalf("managed Bitwarden public key identity is missing:\n%s", output)
+	}
+	if !strings.Contains(output, "IdentitiesOnly yes") {
+		t.Fatalf("managed Bitwarden identity should be exclusive:\n%s", output)
 	}
 }
 
@@ -407,7 +410,7 @@ func TestListAutoUnlocksWhenVaultIsLocked(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, stderr = %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cloud  general  Cloud") {
+	if !strings.Contains(stdout.String(), "cloud  203.0.113.10:22  deploy  general  missing") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "Master password") {
@@ -445,7 +448,7 @@ func TestListSyncRunsBitwardenSync(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, stderr = %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cloud  general  Cloud") {
+	if !strings.Contains(stdout.String(), "cloud  203.0.113.10:22  deploy  general  missing") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
@@ -503,7 +506,7 @@ func TestListReusesCachedSessionWithoutStatus(t *testing.T) {
 	if string(counterAfter) != string(counterBefore) {
 		t.Fatalf("expected cached session to skip bw status, before=%q after=%q", string(counterBefore), string(counterAfter))
 	}
-	if !strings.Contains(stdout.String(), "cloud  general  Cloud") {
+	if !strings.Contains(stdout.String(), "cloud  203.0.113.10:22  deploy  general  missing") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
@@ -548,11 +551,222 @@ func TestListRetriesUnlockWhenCachedSessionReturnsEmptyOutput(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v, stderr = %s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cloud  general  Cloud") {
+	if !strings.Contains(stdout.String(), "cloud  203.0.113.10:22  deploy  general  missing") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "Master password") {
 		t.Fatalf("expected unlock prompt after stale cache, got %q", stderr.String())
+	}
+}
+
+func TestApplyAlwaysSyncsAndWritesManagedPublicKey(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	bwPath := writeFakeBWSyncRequired(t, temp, `[
+  {
+    "id": "item-123",
+    "type": 5,
+    "name": "Dev",
+    "sshKey": {"publicKey": "ssh-ed25519 AAAA dev", "keyFingerprint": "SHA256:dev"},
+    "fields": [
+      {"name": "Enabled", "value": "true"},
+      {"name": "Host", "value": "dev"},
+      {"name": "HostName", "value": "203.0.113.10"},
+      {"name": "User", "value": "root"}
+    ]
+  }
+]`)
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = bwPath
+	cfg.ManagedConfigPath = filepath.Join(temp, "synk.conf")
+	cfg.ManagedKeysPath = filepath.Join(temp, "keys")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--config", cfgPath, "apply"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	managed, err := os.ReadFile(cfg.ManagedConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(cfg.ManagedKeysPath, "bw-item-123.pub")
+	if !strings.Contains(string(managed), "IdentityFile "+keyPath) || !strings.Contains(string(managed), "IdentitiesOnly yes") {
+		t.Fatalf("managed config:\n%s", managed)
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != "ssh-ed25519 AAAA dev\n" {
+		t.Fatalf("key = %q", key)
+	}
+
+	status := NewRootCommand()
+	var statusOut bytes.Buffer
+	status.SetOut(&statusOut)
+	status.SetErr(&bytes.Buffer{})
+	status.SetArgs([]string{"--config", cfgPath, "status"})
+	if err := status.Execute(); err != nil {
+		t.Fatalf("status error = %v", err)
+	}
+	if !strings.Contains(statusOut.String(), "State: up to date") {
+		t.Fatalf("status after apply:\n%s", statusOut.String())
+	}
+
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	repairStatus := NewRootCommand()
+	var repairOut bytes.Buffer
+	repairStatus.SetOut(&repairOut)
+	repairStatus.SetErr(&bytes.Buffer{})
+	repairStatus.SetArgs([]string{"--config", cfgPath, "status"})
+	if err := repairStatus.Execute(); err != nil {
+		t.Fatalf("repair status error = %v", err)
+	}
+	if !strings.Contains(repairOut.String(), "repair-key") {
+		t.Fatalf("missing key repair status:\n%s", repairOut.String())
+	}
+}
+
+func TestPreviewSyncsWithoutWritingFiles(t *testing.T) {
+	temp := t.TempDir()
+	bwPath := writeFakeBWSyncRequired(t, temp, `[
+  {
+    "id": "item-123",
+    "type": 5,
+    "name": "Dev",
+    "sshKey": {"publicKey": "ssh-ed25519 AAAA dev"},
+    "fields": [
+      {"name": "Enabled", "value": "true"},
+      {"name": "HostName", "value": "203.0.113.10"},
+      {"name": "User", "value": "root"}
+    ]
+  }
+]`)
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = bwPath
+	cfg.ManagedConfigPath = filepath.Join(temp, "missing", "synk.conf")
+	cfg.ManagedKeysPath = filepath.Join(temp, "missing", "keys")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--config", cfgPath, "preview"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "IdentityFile "+filepath.Join(cfg.ManagedKeysPath, "bw-item-123.pub")) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(cfg.ManagedConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote managed config: %v", err)
+	}
+	if _, err := os.Stat(cfg.ManagedKeysPath); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote key directory: %v", err)
+	}
+}
+
+func TestShowReadsInstalledConfigWithoutBitwarden(t *testing.T) {
+	temp := t.TempDir()
+	managedPath := filepath.Join(temp, "synk.conf")
+	content := "# installed\nHost dev\n    HostName 203.0.113.10\n"
+	if err := os.WriteFile(managedPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = filepath.Join(temp, "does-not-exist")
+	cfg.ManagedConfigPath = managedPath
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--config", cfgPath, "show"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if stdout.String() != content {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestInitSecondRunDoesNotOverwriteManagedConfig(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("HOME", temp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(temp, "config-home"))
+	cfgPath := filepath.Join(temp, "synk-config.toml")
+
+	first := NewRootCommand()
+	first.SetOut(&bytes.Buffer{})
+	first.SetArgs([]string{"--config", cfgPath, "init"})
+	if err := first.Execute(); err != nil {
+		t.Fatalf("first init error = %v", err)
+	}
+	managedPath := filepath.Join(temp, ".ssh", "config.d", "synk.conf")
+	if err := os.WriteFile(managedPath, []byte("sentinel\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := NewRootCommand()
+	var stdout bytes.Buffer
+	second.SetOut(&stdout)
+	second.SetArgs([]string{"--config", cfgPath, "init"})
+	if err := second.Execute(); err != nil {
+		t.Fatalf("second init error = %v", err)
+	}
+	data, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "sentinel\n" || !strings.Contains(stdout.String(), "already initialized") {
+		t.Fatalf("content=%q stdout=%q", data, stdout.String())
+	}
+}
+
+func TestListAllClassifiesProfileCandidates(t *testing.T) {
+	temp := t.TempDir()
+	bwPath := writeFakeBW(t, temp, `[
+  {"id":"g","type":5,"name":"General Dev","sshKey":{"publicKey":"ssh-ed25519 AAAA general"},"fields":[{"name":"Enabled","value":"true"},{"name":"Host","value":"dev"},{"name":"Profiles","value":"general"},{"name":"HostName","value":"general.example.com"},{"name":"User","value":"root"}]},
+  {"id":"p","type":5,"name":"Pro Dev","sshKey":{"publicKey":"ssh-ed25519 AAAA pro"},"fields":[{"name":"Enabled","value":"true"},{"name":"Host","value":"dev"},{"name":"Profiles","value":"pro"},{"name":"HostName","value":"pro.example.com"},{"name":"User","value":"root"}]},
+  {"id":"t","type":5,"name":"Test Host","sshKey":{"publicKey":"ssh-ed25519 AAAA test"},"fields":[{"name":"Enabled","value":"true"},{"name":"Host","value":"test"},{"name":"Profiles","value":"test"},{"name":"HostName","value":"test.example.com"},{"name":"User","value":"root"}]}
+]`)
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = bwPath
+	cfg.ActiveProfiles = []string{"general", "pro"}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"--config", cfgPath, "list", "--all"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"overridden by pro", "effective", "inactive"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, stdout.String())
+		}
 	}
 }
 
@@ -678,6 +892,10 @@ func writeFakeBWEmptyOnBadSession(t *testing.T, dir string, itemsJSON string) st
 		"if [ \"$1\" = \"unlock\" ] && [ \"$2\" = \"--raw\" ]; then\n" +
 		"  printf '%s\\n' '? Master password: [input is hidden]' >&2\n" +
 		"  printf '%s\\n' 'test-session'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"sync\" ]; then\n" +
+		"  if [ \"${BW_SESSION:-}\" != \"test-session\" ]; then exit 0; fi\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"if [ \"$1\" = \"list\" ] && [ \"$2\" = \"items\" ]; then\n" +

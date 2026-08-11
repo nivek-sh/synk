@@ -20,6 +20,7 @@ func TestSaveLoadConfig(t *testing.T) {
 	cfg := Config{
 		ActiveProfiles:    []string{"nk", "pro"},
 		ManagedConfigPath: "~/custom/synk.conf",
+		ManagedKeysPath:   "~/custom/keys",
 		BWPath:            "/usr/bin/bw",
 		AutoSync:          true,
 	}
@@ -38,6 +39,9 @@ func TestSaveLoadConfig(t *testing.T) {
 	}
 	if loaded.ManagedConfigPath != cfg.ManagedConfigPath {
 		t.Fatalf("ManagedConfigPath = %q", loaded.ManagedConfigPath)
+	}
+	if loaded.ManagedKeysPath != cfg.ManagedKeysPath {
+		t.Fatalf("ManagedKeysPath = %q", loaded.ManagedKeysPath)
 	}
 	if loaded.BWPath != cfg.BWPath {
 		t.Fatalf("BWPath = %q", loaded.BWPath)

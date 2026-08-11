@@ -15,6 +15,7 @@ type Item struct {
 	Notes  string  `json:"notes"`
 	Login  *Login  `json:"login"`
 	Fields []Field `json:"fields"`
+	SSHKey *SSHKey `json:"sshKey"`
 }
 
 const SSHKeyItemType = 5
@@ -26,6 +27,11 @@ type Login struct {
 type Field struct {
 	Name  string `json:"name"`
 	Value any    `json:"value"`
+}
+
+type SSHKey struct {
+	PublicKey      string `json:"publicKey"`
+	KeyFingerprint string `json:"keyFingerprint"`
 }
 
 func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
@@ -82,12 +88,21 @@ func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 		}
 
 		for _, profile := range profiles {
+			publicKey := ""
+			fingerprint := ""
+			if item.SSHKey != nil {
+				publicKey = strings.TrimSpace(item.SSHKey.PublicKey)
+				fingerprint = strings.TrimSpace(item.SSHKey.KeyFingerprint)
+			}
 			entries = append(entries, sshconfig.Entry{
-				Host:       host,
-				Profile:    profile,
-				Source:     itemLabel(item),
-				Notes:      item.Notes,
-				Directives: directives,
+				Host:           host,
+				Profile:        profile,
+				Source:         itemLabel(item),
+				SourceID:       strings.TrimSpace(item.ID),
+				Notes:          item.Notes,
+				PublicKey:      publicKey,
+				KeyFingerprint: fingerprint,
+				Directives:     directives,
 			})
 		}
 	}

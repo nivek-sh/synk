@@ -79,3 +79,39 @@ func TestWriteManagedConfigCreatesPrivateFile(t *testing.T) {
 		t.Fatalf("mode = %o, want 600", got)
 	}
 }
+
+func TestRemoveIncludeIsIdempotentAndPreservesOtherConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sshDir, "config")
+	original := "Include ~/.ssh/config.d/synk.conf\n\nHost github.com\n    User git\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := RemoveInclude("", "~/.ssh/config.d/synk.conf")
+	if err != nil {
+		t.Fatalf("RemoveInclude() error = %v", err)
+	}
+	if !first.Changed || first.BackupPath == "" {
+		t.Fatalf("first result = %#v", first)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "Host github.com\n    User git\n" {
+		t.Fatalf("config = %q", string(data))
+	}
+	second, err := RemoveInclude("", "~/.ssh/config.d/synk.conf")
+	if err != nil {
+		t.Fatalf("second RemoveInclude() error = %v", err)
+	}
+	if second.Changed {
+		t.Fatal("second removal should be a no-op")
+	}
+}

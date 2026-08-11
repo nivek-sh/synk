@@ -42,7 +42,11 @@ func renderProfileStatus(out io.Writer, entries []sshconfig.Entry, activeProfile
 		name := profileStatusColor(status, color)
 		summary := profileStatusSummary(status)
 		override := profileOverrideCounts(status)
-		fmt.Fprintf(out, "%d\t%s\t%s\t%d\t%s\n", idx+1, name, summary, status.HostCount, override)
+		position := "-"
+		if status.Active {
+			position = fmt.Sprint(idx + 1)
+		}
+		fmt.Fprintf(out, "%s\t%s\t%s\t%d\t%s\n", position, name, summary, status.HostCount, override)
 	}
 }
 

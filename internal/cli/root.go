@@ -41,6 +41,11 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newDoctorCommand(opts))
 	cmd.AddCommand(newApplyCommand(opts))
 	cmd.AddCommand(newListCommand(opts))
+	cmd.AddCommand(newShowCommand(opts))
+	cmd.AddCommand(newPreviewCommand(opts))
+	cmd.AddCommand(newStatusCommand(opts))
+	cmd.AddCommand(newDiffCommand(opts))
+	cmd.AddCommand(newDisableCommand(opts))
 	cmd.AddCommand(newProfileCommand(opts))
 	cmd.AddCommand(newCacheCommand(opts))
 
@@ -56,19 +61,49 @@ func newInitCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			expandedCfgPath, err := config.ExpandPath(cfgPath)
+			if err != nil {
+				return err
+			}
+			_, cfgStatErr := os.Stat(expandedCfgPath)
+			cfgExists := cfgStatErr == nil
+			if cfgStatErr != nil && !os.IsNotExist(cfgStatErr) {
+				return cfgStatErr
+			}
 			cfg, err := config.Load(cfgPath)
 			if err != nil {
 				return err
 			}
-			if err := config.Save(cfgPath, cfg); err != nil {
+			includeExists, err := sshconfig.HasInclude("", cfg.ManagedConfigPath)
+			if err != nil {
 				return err
+			}
+			expandedManagedPath, err := config.ExpandPath(cfg.ManagedConfigPath)
+			if err != nil {
+				return err
+			}
+			_, managedStatErr := os.Stat(expandedManagedPath)
+			managedExists := managedStatErr == nil
+			if managedStatErr != nil && !os.IsNotExist(managedStatErr) {
+				return managedStatErr
+			}
+			if cfgExists && includeExists && managedExists {
+				fmt.Fprintf(cmd.OutOrStdout(), "synk is already initialized; no changes made\n")
+				return nil
+			}
+			if !cfgExists {
+				if err := config.Save(cfgPath, cfg); err != nil {
+					return err
+				}
 			}
 			install, err := sshconfig.InstallInclude("", cfg.ManagedConfigPath)
 			if err != nil {
 				return err
 			}
-			if err := sshconfig.WriteManagedConfig(cfg.ManagedConfigPath, sshconfig.Render(nil, cfg.ActiveProfiles)); err != nil {
-				return err
+			if !managedExists {
+				if err := sshconfig.WriteManagedConfig(cfg.ManagedConfigPath, sshconfig.Render(nil, cfg.ActiveProfiles)); err != nil {
+					return err
+				}
 			}
 
 			out := cmd.OutOrStdout()
@@ -141,9 +176,9 @@ func newDoctorCommand(opts *rootOptions) *cobra.Command {
 }
 
 func newApplyCommand(opts *rootOptions) *cobra.Command {
-	var syncVault bool
 	var dryRun bool
 	var stdout bool
+	var legacySync bool
 
 	cmd := &cobra.Command{
 		Use:   "apply",
@@ -153,60 +188,81 @@ func newApplyCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, warnings, err := fetchEntries(cmd.Context(), cfg, syncVault || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			state, err := buildDesiredState(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			for _, warning := range warnings {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
-			}
-
-			rendered := sshconfig.Render(entries, cfg.ActiveProfiles)
+			printWarnings(state.Warnings, cmd.ErrOrStderr())
 
 			if stdout || dryRun {
-				_, err := io.WriteString(cmd.OutOrStdout(), rendered)
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: apply preview flags are deprecated; use `synk preview`")
+				_, err := io.WriteString(cmd.OutOrStdout(), state.Rendered)
 				return err
 			}
 
-			if err := sshconfig.WriteManagedConfig(cfg.ManagedConfigPath, rendered); err != nil {
+			if err := sshconfig.WriteManagedPublicKeys(state.PublicKeys, cfg.ManagedKeysPath); err != nil {
+				return err
+			}
+			if err := sshconfig.WriteManagedConfig(cfg.ManagedConfigPath, state.Rendered); err != nil {
+				return err
+			}
+			if err := sshconfig.RemoveStaleManagedPublicKeys(state.PublicKeys, cfg.ManagedKeysPath); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", cfg.ManagedConfigPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "managed %d public keys in %s\n", len(state.PublicKeys), cfg.ManagedKeysPath)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&syncVault, "sync", false, "run bw sync before reading items")
+	cmd.Flags().BoolVar(&legacySync, "sync", false, "deprecated: apply always syncs Bitwarden")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated config without writing files")
 	cmd.Flags().BoolVar(&stdout, "stdout", false, "print generated config without writing files")
+	_ = cmd.Flags().MarkDeprecated("sync", "apply always syncs Bitwarden")
+	_ = legacySync
 	return cmd
 }
 
 func newListCommand(opts *rootOptions) *cobra.Command {
-	var syncVault bool
+	var all bool
+	var legacySync bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List effective SSH hosts from Bitwarden",
+		Short: "List desired SSH hosts from a fresh Bitwarden vault",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			entries, warnings, err := fetchEntries(cmd.Context(), cfg, syncVault || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			rawEntries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			_ = warnings
+			merged, err := sshconfig.Merge(rawEntries, cfg.ActiveProfiles)
+			if err != nil {
+				return err
+			}
+			printWarnings(merged.Warnings, cmd.ErrOrStderr())
 
 			out := cmd.OutOrStdout()
 			table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(table, "HOST\tPROFILE\tSOURCE")
-			for _, entry := range entries {
-				fmt.Fprintf(table, "%s\t%s\t%s\n", entry.Host, entry.Profile, entry.Source)
+			if all {
+				fmt.Fprintln(table, "STATE\tHOST\tDESTINATION\tUSER\tPROFILE\tIDENTITY\tSOURCE")
+				for _, entry := range classifyAllEntries(rawEntries, merged.Entries, cfg.ActiveProfiles) {
+					fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", entry.State, entry.Entry.Host, entryDestination(entry.Entry), entry.Entry.Directives["User"], entry.Entry.Profile, entryIdentity(entry.Entry), entry.Entry.Source)
+				}
+			} else {
+				fmt.Fprintln(table, "HOST\tDESTINATION\tUSER\tPROFILE\tIDENTITY\tSOURCE")
+				for _, entry := range merged.Entries {
+					fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", entry.Host, entryDestination(entry), entry.Directives["User"], entry.Profile, entryIdentity(entry), entry.Source)
+				}
 			}
 			return table.Flush()
 		},
 	}
-	cmd.Flags().BoolVar(&syncVault, "sync", false, "run bw sync before reading items")
+	cmd.Flags().BoolVar(&all, "all", false, "include inactive and overridden Bitwarden entries")
+	cmd.Flags().BoolVar(&legacySync, "sync", false, "deprecated: list always syncs Bitwarden")
+	_ = cmd.Flags().MarkDeprecated("sync", "list always syncs Bitwarden")
+	_ = legacySync
 	return cmd
 }
 
@@ -278,21 +334,6 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
-		Use:   "list",
-		Short: "List active profiles",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := loadConfig(opts.configPath)
-			if err != nil {
-				return err
-			}
-			for idx, profile := range cfg.ActiveProfiles {
-				fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\n", idx+1, profile)
-			}
-			return nil
-		},
-	})
-	cmd.AddCommand(&cobra.Command{
 		Use:   "move PROFILE up|down|top|bottom|before TARGET|after TARGET",
 		Short: "Move an active profile without rewriting the full order",
 		Args:  cobra.MinimumNArgs(2),
@@ -308,18 +349,40 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 		},
 	})
 
-	var statusSync bool
-	var statusNoColor bool
-	statusCommand := &cobra.Command{
-		Use:   "status",
-		Short: "Show profile order and override status from Bitwarden",
+	var listNoColor bool
+	profileListCommand := &cobra.Command{
+		Use:   "list",
+		Short: "List discovered profiles and their override state",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, statusSync || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			renderProfileStatus(cmd.OutOrStdout(), entries, cfg.ActiveProfiles, colorMode(shouldUseColor(cmd.OutOrStdout(), listNoColor)))
+			return nil
+		},
+	}
+	profileListCommand.Flags().BoolVar(&listNoColor, "no-color", false, "disable ANSI colors")
+	cmd.AddCommand(profileListCommand)
+
+	var statusSync bool
+	var statusNoColor bool
+	statusCommand := &cobra.Command{
+		Use:        "status",
+		Short:      "Deprecated alias for profile list",
+		Deprecated: "use `synk profile list`",
+		Args:       cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -327,30 +390,58 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			return nil
 		},
 	}
-	statusCommand.Flags().BoolVar(&statusSync, "sync", false, "run bw sync before reading items")
+	statusCommand.Flags().BoolVar(&statusSync, "sync", false, "deprecated: profile status always syncs Bitwarden")
 	statusCommand.Flags().BoolVar(&statusNoColor, "no-color", false, "disable ANSI colors")
+	_ = statusCommand.Flags().MarkDeprecated("sync", "profile status always syncs Bitwarden")
+	_ = statusSync
 	cmd.AddCommand(statusCommand)
+
+	var explainNoColor bool
+	explainCommand := &cobra.Command{
+		Use:   "explain [HOST]",
+		Short: "Explain which profile entries win and which are overridden",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			if len(args) == 1 {
+				entries = filterEntriesByHost(entries, args[0])
+			}
+			return renderProfileDiff(cmd.OutOrStdout(), entries, cfg.ActiveProfiles, colorMode(shouldUseColor(cmd.OutOrStdout(), explainNoColor)))
+		},
+	}
+	explainCommand.Flags().BoolVar(&explainNoColor, "no-color", false, "disable ANSI colors")
+	cmd.AddCommand(explainCommand)
 
 	var diffSync bool
 	var diffNoColor bool
 	diffCommand := &cobra.Command{
-		Use:   "diff",
-		Short: "Show the effective config with profile override markers",
-		Args:  cobra.NoArgs,
+		Use:        "diff",
+		Short:      "Deprecated alias for profile explain",
+		Deprecated: "use `synk profile explain`",
+		Args:       cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, diffSync || cfg.AutoSync, cmd.InOrStdin(), cmd.ErrOrStderr())
+			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			return renderProfileDiff(cmd.OutOrStdout(), entries, cfg.ActiveProfiles, colorMode(shouldUseColor(cmd.OutOrStdout(), diffNoColor)))
 		},
 	}
-	diffCommand.Flags().BoolVar(&diffSync, "sync", false, "run bw sync before reading items")
+	diffCommand.Flags().BoolVar(&diffSync, "sync", false, "deprecated: profile diff always syncs Bitwarden")
 	diffCommand.Flags().BoolVar(&diffNoColor, "no-color", false, "disable ANSI colors")
+	_ = diffCommand.Flags().MarkDeprecated("sync", "profile diff always syncs Bitwarden")
+	_ = diffSync
 	cmd.AddCommand(diffCommand)
 
 	var editLocal bool

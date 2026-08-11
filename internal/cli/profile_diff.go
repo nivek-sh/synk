@@ -151,3 +151,14 @@ func colorProfileDiffLine(marker profileDiffMarker, line string, color colorMode
 		return line
 	}
 }
+
+func filterEntriesByHost(entries []sshconfig.Entry, host string) []sshconfig.Entry {
+	host = strings.TrimSpace(host)
+	filtered := []sshconfig.Entry{}
+	for _, entry := range entries {
+		if entry.Host == host {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}

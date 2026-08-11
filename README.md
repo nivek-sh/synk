@@ -29,8 +29,8 @@ names, without a `ssh_` prefix.
 | `HostName` | yes | Real host, IP, or DNS name to connect to |
 | `User` | yes | SSH username for the host |
 | `Port` | no | SSH port |
-| `IdentityFile` | no | Local identity file path, only emitted when explicitly configured |
-| `IdentitiesOnly` | no | Restrict auth to configured identity files |
+| `IdentityFile` | no | Explicit local identity path. If omitted, synk manages the Bitwarden public key automatically |
+| `IdentitiesOnly` | no | Restrict auth to configured identities. Defaults to `yes` for managed Bitwarden keys |
 | `ProxyJump` | no | Jump host chain |
 | `ProxyCommand` | no | Custom proxy command |
 | `ForwardAgent` | no | Enable or disable agent forwarding |
@@ -62,14 +62,28 @@ generated `Host` block.
 
 Use `Profiles`, plural, for profile assignment. `Profile` is not supported.
 
+For an effective Bitwarden SSH key item without an explicit `IdentityFile`,
+`synk` writes the item's native public key under
+`~/.ssh/config.d/synk.keys/` and points OpenSSH to that `.pub` file with
+`IdentitiesOnly yes`. This lets OpenSSH select the matching private key from
+the Bitwarden SSH agent without writing private key material to disk.
+
 ## Commands
 
 ```sh
 synk init
+synk disable
 synk doctor
-synk profile status
-synk profile diff
-synk profile diff --sync
+synk show
+synk preview
+synk status
+synk diff
+synk list
+synk list --all
+synk apply
+synk profile list
+synk profile explain
+synk profile explain dev
 synk profile edit
 synk profile edit --local
 synk profile edit --refresh manual
@@ -82,32 +96,60 @@ synk profile show
 synk profile set general,nk,pro
 synk cache refresh
 synk cache refresh --no-sync
-synk apply --dry-run
-synk apply --sync
-synk list
-synk list --sync
 ```
 
 `synk init` creates `~/.config/synk/config.toml`, installs an idempotent
 `Include ~/.ssh/config.d/synk.conf` line in `~/.ssh/config`, and creates the
-managed config file.
+managed config file. If all three already exist, it reports that synk is
+initialized and does not rewrite anything. If the installation is partial, it
+repairs only the missing pieces.
+
+`synk disable` removes only that `Include` line after backing up the user SSH
+config. The synk config, generated SSH config, and public keys are retained;
+run `synk init` to enable the integration again.
 
 By default, `synk apply` writes:
 
 - `~/.ssh/config.d/synk.conf`
+- `~/.ssh/config.d/synk.keys/bw-<item-id>.pub`
 
-Use `--stdout` or `--dry-run` to print without writing.
+`apply` always runs `bw sync` first. If syncing, validation, or public-key
+preparation fails, the managed SSH config is not replaced. Public keys are
+written before the config so the config never points to a missing managed key.
 
-Use `--sync` on commands that read Bitwarden when you want to force `bw sync`
-before reading items, for example `synk list --sync`, `synk apply --sync`,
-`synk profile status --sync`, or `synk profile diff --sync`.
+Use the inspection commands to distinguish installed and desired state:
+
+- `synk show` prints the currently installed managed config without contacting
+  Bitwarden.
+- `synk preview` syncs Bitwarden and prints exactly what `apply` would install,
+  without writing files.
+- `synk status` reports additions, updates, removals, and missing or obsolete
+  managed public keys.
+- `synk diff` prints the installed-to-desired config diff and public-key
+  repairs.
+- `synk list` lists effective hosts after profile precedence is resolved.
+- `synk list --all` also shows inactive and overridden Bitwarden candidates.
+
+Commands that promise current Bitwarden state (`apply`, `preview`, `status`,
+`diff`, `list`, `profile list`, and `profile explain`) always run `bw sync`.
+The old `--sync`, `apply --stdout`, and `apply --dry-run` interfaces remain as
+deprecated compatibility options.
 
 `synk cache refresh` always runs `bw sync` before reading items because the
 cache is meant to represent fresh Bitwarden metadata. Use
 `synk cache refresh --no-sync` only when you explicitly want to skip syncing.
 
-`synk` never writes private keys or public keys. If you need `IdentityFile`, add
-it explicitly as a Bitwarden custom field.
+`synk` never writes private keys. It stores only public keys for effective
+items that do not have an explicit `IdentityFile`. Managed public-key files use
+mode `0600` inside a `0700` directory. An explicit `IdentityFile` always takes
+precedence over automatic Bitwarden public-key management.
+
+The managed locations can be changed in `config.toml`:
+
+```toml
+managed_config_path = "~/.ssh/config.d/synk.conf"
+managed_keys_path = "~/.ssh/config.d/synk.keys"
+```
 
 If the Bitwarden CLI is logged in but locked, commands that read the vault run
 `bw unlock --raw` automatically and let `bw` show its normal password prompt.
@@ -204,7 +246,7 @@ Inside the editor:
 - `enter` saves.
 - `q` cancels.
 
-The editor and `synk profile status` color profiles by override state when the
+The editor and `synk profile list` color profiles by override state when the
 terminal supports ANSI colors:
 
 - green: no hosts from that profile are overridden by later profiles.
@@ -212,23 +254,25 @@ terminal supports ANSI colors:
 - red: every host in that profile is overridden.
 - dim: profile has no active hosts or is inactive.
 
-The editor and `synk profile status` keep the `OVERRIDE` column compact with
-counts only. Use `synk profile diff` when you want to inspect the effective
-config with override markers:
+The editor and `synk profile list` keep the `OVERRIDE` column compact with
+counts only. Use `synk profile explain` when you want to inspect why one entry
+wins over another:
 
 ```sh
-synk profile diff
+synk profile explain
+synk profile explain dev
 ```
 
-`profile diff` renders OpenSSH-style `Host` blocks in the same order as the
+`profile explain` renders OpenSSH-style `Host` blocks in the same order as the
 managed config:
 
 - `=` marks a block that is kept and has no competing profile.
 - `+` marks the winning block for a `Host` that overrides earlier profiles.
 - `-` marks blocks that are discarded because a later profile wins.
 
-Use `--sync` to force `bw sync` before reading Bitwarden, or `--no-color` for
-plain output.
+It always syncs Bitwarden. Use `--no-color` for plain output. The old
+`profile status` and `profile diff` names remain as deprecated aliases for
+`profile list` and `profile explain`.
 
 For scripts or quick edits, move one profile at a time:
 
