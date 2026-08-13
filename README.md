@@ -5,7 +5,57 @@ synk
 It is meant for setups where `general -> personal -> work` should resolve to one
 effective `Host` block per alias.
 
-Status: early v1 implementation.
+Status: early development.
+
+## Installation
+
+Runtime dependencies are the Bitwarden CLI (`bw`) and the OpenSSH client
+(`ssh`).
+
+### Arch Linux (AUR)
+
+```sh
+paru -S synk
+```
+
+### GitHub release archive
+
+Download the archive for your platform from the
+[latest GitHub release](https://github.com/nivek-sh/synk/releases/latest):
+
+- `linux-x86_64` or `linux-arm64`
+- `macos-x86_64` or `macos-arm64`
+
+The standalone `install.sh` asset detects the current platform, downloads the
+matching archive from that release, verifies it against `SHA256SUMS`, and
+installs it:
+
+```sh
+curl -fsSLO https://github.com/nivek-sh/synk/releases/latest/download/install.sh
+bash install.sh
+```
+
+The same installer is also bundled inside every platform archive, so the
+download can be inspected and installed entirely offline after extraction.
+
+The default destination is `~/.local/bin`. For a system-wide installation:
+
+```sh
+sudo ./install.sh --system
+```
+
+Use `./install.sh --dir PATH` or `SYNK_INSTALL_DIR=PATH ./install.sh` for a
+custom destination. The installer only copies the bundled `synk` binary; it
+does not modify SSH configuration. Run `synk init` explicitly when ready.
+
+### Nix
+
+Run or install a pinned release directly from its Git tag:
+
+```sh
+nix run github:nivek-sh/synk/v0.3.0 -- --version
+nix profile install github:nivek-sh/synk/v0.3.0
+```
 
 ## How it works
 
@@ -303,3 +353,56 @@ local wrapper that runs the current source tree with `go run`.
 
 On a fresh Git repo, run `git add .` before `nix flake check` or `nix build` so
 Nix can see the Go sources.
+
+## Publishing a release
+
+The `Release` GitHub Actions workflow runs for stable tags matching
+`vMAJOR.MINOR.PATCH`. It:
+
+1. runs all Go tests and `go vet`;
+2. builds Linux and macOS archives for x86-64 and ARM64;
+3. creates a deterministic source archive, standalone installer, and
+   `SHA256SUMS`;
+4. creates a GitHub Release with generated release notes;
+5. validates the AUR package in an Arch Linux container and pushes its updated
+   `PKGBUILD` and `.SRCINFO`.
+
+Before tagging, update both version occurrences in `flake.nix` and `pkgver` in
+`packaging/aur/PKGBUILD`, then run:
+
+```sh
+just check
+git add .
+git commit -m "feat: release v0.4.0"
+git tag -a v0.4.0 -m "synk v0.4.0"
+git push --atomic origin master v0.4.0
+```
+
+The tag, `flake.nix`, and the AUR template must declare the same version or the
+workflow stops before publishing.
+
+### GitHub Actions credentials
+
+GitHub Releases use the automatically provided `GITHUB_TOKEN`; no personal
+access token is needed. The workflow grants it only `contents: write` in the
+release job.
+
+Publishing to AUR needs one repository secret named
+`AUR_SSH_PRIVATE_KEY`. Create a dedicated unencrypted key for this automation:
+
+```sh
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/synk-aur-actions -C synk-github-actions
+```
+
+Append `~/.ssh/synk-aur-actions.pub` to the SSH public keys in the AUR account,
+then store the complete contents of `~/.ssh/synk-aur-actions` in GitHub under
+`Settings -> Secrets and variables -> Actions -> New repository secret`.
+The dedicated key can be revoked without affecting personal SSH keys.
+
+The optional repository variables `AUR_GIT_NAME` and `AUR_GIT_EMAIL` control
+the AUR commit author. They default to the current maintainer identity.
+
+To create release assets for an existing tag, open `Actions -> Release -> Run
+workflow`, enter the tag, and leave `publish_aur` disabled. This is the intended
+way to create the first GitHub Release for the existing `v0.3.0` tag without
+republishing AUR.

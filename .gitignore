@@ -4,6 +4,7 @@
 /.direnv
 /.nix-dev
 /coverage.out
+/dist/
 
 # makepkg artifacts
 /packaging/aur/pkg/

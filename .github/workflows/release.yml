@@ -1,0 +1,230 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to publish, for example v0.3.0
+        required: true
+        type: string
+      publish_aur:
+        description: Also update AUR (normally disabled when backfilling a release)
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  AUTOMATION_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.default_branch || github.ref }}
+  ARCHLINUX_IMAGE: archlinux:base-devel@sha256:ee205c220399524a683cf495d411691b921baed8ab47cdc6d732efa782fae484
+
+jobs:
+  release:
+    name: Build and publish GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Check out release automation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.AUTOMATION_REF }}
+          path: automation
+          persist-credentials: false
+          sparse-checkout: scripts/release
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+
+      - name: Record release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'invalid stable release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$RELEASE_TAG" >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${RELEASE_TAG#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Test
+        working-directory: source
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          automation/scripts/release/build-release.sh \
+            "$GITHUB_WORKSPACE/source" \
+            "$GITHUB_WORKSPACE/automation/scripts/release/install.sh" \
+            "$RUNNER_TEMP/release" \
+            "$RELEASE_TAG"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "synk $RELEASE_TAG"
+          fi
+
+  aur:
+    name: Publish AUR package
+    needs: release
+    if: ${{ github.event_name == 'push' || inputs.publish_aur }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AUR_GIT_NAME: ${{ vars.AUR_GIT_NAME || 'NivekNK' }}
+      AUR_GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL || '79262770+NivekNK@users.noreply.github.com' }}
+      AUR_HOST_FINGERPRINT: SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      RELEASE_TAG: ${{ needs.release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.AUTOMATION_REF }}
+          persist-credentials: false
+          sparse-checkout: scripts/release
+
+      - name: Download released source archive
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/synk-$RELEASE_VERSION.tar.gz"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/synk-$RELEASE_VERSION.tar.gz"
+          curl --fail --location --retry 5 --retry-all-errors --output "$archive" "$url"
+          checksum="$(sha256sum "$archive" | awk '{print $1}')"
+          printf 'checksum=%s\n' "$checksum" >>"$GITHUB_OUTPUT"
+
+      - name: Configure AUR SSH access
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${AUR_SSH_PRIVATE_KEY:-}" ]]; then
+            echo 'AUR_SSH_PRIVATE_KEY repository secret is required' >&2
+            exit 1
+          fi
+
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' >"$HOME/.ssh/aur"
+
+          known_hosts="$RUNNER_TEMP/aur-known-hosts"
+          for attempt in 1 2 3 4 5; do
+            if ssh-keyscan -t ed25519 aur.archlinux.org >"$known_hosts" 2>/dev/null; then
+              break
+            fi
+            sleep "$attempt"
+          done
+          [[ -s "$known_hosts" ]] || {
+            echo 'could not retrieve the AUR SSH host key' >&2
+            exit 1
+          }
+
+          actual_fingerprint="$(ssh-keygen -lf "$known_hosts" | awk '{print $2}')"
+          if [[ "$actual_fingerprint" != "$AUR_HOST_FINGERPRINT" ]]; then
+            printf 'unexpected AUR SSH host fingerprint: %s\n' "$actual_fingerprint" >&2
+            exit 1
+          fi
+          install -m 0600 "$known_hosts" "$HOME/.ssh/known_hosts"
+          printf '%s\n' \
+            'Host aur.archlinux.org' \
+            '  User aur' \
+            "  IdentityFile $HOME/.ssh/aur" \
+            '  IdentitiesOnly yes' \
+            >"$HOME/.ssh/config"
+
+      - name: Update AUR package files
+        env:
+          SOURCE_CHECKSUM: ${{ steps.source.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone ssh://aur@aur.archlinux.org/synk.git "$RUNNER_TEMP/aur-package"
+          scripts/release/update-aur-package.sh \
+            "$RUNNER_TEMP/aur-package" \
+            "$RELEASE_VERSION" \
+            "$SOURCE_CHECKSUM"
+
+          docker run --rm \
+            --volume "$RUNNER_TEMP/aur-package:/pkg:ro" \
+            "$ARCHLINUX_IMAGE" \
+            bash -euc '
+              useradd --create-home builder
+              cp -a /pkg /build
+              chown -R builder:builder /build
+              su builder -s /bin/bash -c "cd /build && makepkg --printsrcinfo"
+            ' >"$RUNNER_TEMP/aur-package/.SRCINFO"
+
+      - name: Validate AUR build
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$RUNNER_TEMP/aur-package:/pkg:ro" \
+            "$ARCHLINUX_IMAGE" \
+            bash -euc '
+              pacman -Syu --noconfirm --needed go git curl
+              useradd --create-home builder
+              cp -a /pkg /build
+              chown -R builder:builder /build
+              su builder -s /bin/bash -c "cd /build && makepkg --cleanbuild --nodeps --noconfirm"
+            '
+
+      - name: Push AUR update
+        working-directory: ${{ runner.temp }}/aur-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- PKGBUILD .SRCINFO; then
+            echo "AUR already contains synk $RELEASE_VERSION-1"
+            exit 0
+          fi
+
+          git config user.name "$AUR_GIT_NAME"
+          git config user.email "$AUR_GIT_EMAIL"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to v$RELEASE_VERSION"
+          git push origin master
