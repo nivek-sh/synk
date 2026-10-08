@@ -53,8 +53,8 @@ does not modify SSH configuration. Run `synk init` explicitly when ready.
 Run or install a pinned release directly from its Git tag:
 
 ```sh
-nix run github:nivek-sh/synk/v0.3.0 -- --version
-nix profile install github:nivek-sh/synk/v0.3.0
+nix run github:nivek-sh/synk/v0.4.1 -- --version
+nix profile install github:nivek-sh/synk/v0.4.1
 ```
 
 ## How it works
@@ -405,11 +405,11 @@ Before tagging, update both version occurrences in `flake.nix` and `pkgver` in
 `packaging/aur/PKGBUILD`, then run:
 
 ```sh
+git add -A
 just check
-git add .
-git commit -m "feat: release v0.4.0"
-git tag -a v0.4.0 -m "synk v0.4.0"
-git push --atomic origin master v0.4.0
+git commit -m "fix: release v0.4.1"
+git tag -a v0.4.1 -m "synk v0.4.1"
+git push --atomic origin master v0.4.1
 ```
 
 The tag, `flake.nix`, and the AUR template must declare the same version or the
