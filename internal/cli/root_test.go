@@ -77,6 +77,73 @@ func TestApplyStdoutUsesFakeBW(t *testing.T) {
 	}
 }
 
+func TestRecentSyncSkipsConsecutiveReadsButNotApply(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	t.Setenv("BW_SESSION", "first-session")
+	callLog := filepath.Join(temp, "calls")
+	t.Setenv("SYNK_TEST_CALLS", callLog)
+	bwPath := filepath.Join(temp, "bw")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$1\" >> \"$SYNK_TEST_CALLS\"\n" +
+		"case \"$1\" in\n" +
+		"  sync) exit 0 ;;\n" +
+		"  list) printf '%s\\n' '[]'; exit 0 ;;\n" +
+		"  status) printf '%s\\n' '{\"status\":\"unlocked\"}'; exit 0 ;;\n" +
+		"esac\nexit 1\n"
+	if err := os.WriteFile(bwPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = bwPath
+	cfg.ManagedConfigPath = filepath.Join(temp, "synk.conf")
+	cfg.ManagedKeysPath = filepath.Join(temp, "keys")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := NewRootCommand()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs(append([]string{"--config", cfgPath}, args...))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("%v: %v; stderr: %s", args, err, errOut.String())
+		}
+	}
+	countSyncs := func(want int) {
+		t.Helper()
+		data, err := os.ReadFile(callLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(data), "sync\n"); got != want {
+			t.Fatalf("sync calls = %d, want %d; calls = %q", got, want, data)
+		}
+	}
+	run("list")
+	countSyncs(1)
+	run("status")
+	countSyncs(1)
+	run("--force-sync", "preview")
+	countSyncs(2)
+	run("apply", "--dry-run")
+	countSyncs(3)
+	run("list")
+	countSyncs(3)
+	t.Setenv("BW_SESSION", "second-session")
+	run("list")
+	countSyncs(4)
+	run("list", "--force-sync")
+	countSyncs(5)
+	t.Setenv("BW_SESSION", "")
+	run("list")
+	run("list")
+	countSyncs(7)
+}
+
 func TestDoctorAllowsLockedVault(t *testing.T) {
 	temp := t.TempDir()
 	bwPath := writeFakeBWWithStatus(t, temp, "locked", "[]")
@@ -589,7 +656,7 @@ func TestApplyAlwaysSyncsAndWritesManagedPublicKey(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--config", cfgPath, "apply"})
+	cmd.SetArgs([]string{"--config", cfgPath, "apply", "--no-progress"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -635,6 +702,108 @@ func TestApplyAlwaysSyncsAndWritesManagedPublicKey(t *testing.T) {
 	}
 	if !strings.Contains(repairOut.String(), "repair-key") {
 		t.Fatalf("missing key repair status:\n%s", repairOut.String())
+	}
+}
+
+func TestLegacySSHNotePreviewApplyAndRepair(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	secret := "-----BEGIN DSA PRIVATE KEY-----\nQUJDRA==\n-----END DSA PRIVATE KEY-----\n"
+	flattenedSecret := strings.ReplaceAll(strings.TrimSpace(secret), "\n", " ")
+	quotedSecret, err := json.Marshal(flattenedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bwPath := writeFakeBW(t, temp, `[
+  {
+    "id": "legacy-123",
+    "type": 2,
+    "name": "Old server",
+    "fields": [
+      {"name": "Legacy SSH", "type": 2, "value": "true"},
+      {"name": "Private Key", "type": 1, "value": `+string(quotedSecret)+`},
+      {"name": "Enabled", "value": "true"},
+      {"name": "Host", "value": "old-server"},
+      {"name": "HostName", "value": "old.example.com"},
+      {"name": "User", "value": "deploy"}
+    ]
+  }
+]`)
+	cfgPath := filepath.Join(temp, "config.toml")
+	cfg := config.Default()
+	cfg.BWPath = bwPath
+	cfg.ManagedConfigPath = filepath.Join(temp, "synk.conf")
+	cfg.ManagedKeysPath = filepath.Join(temp, "keys")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(cfg.ManagedKeysPath, "bw-legacy-123.key")
+	for _, subcommand := range []string{"preview", "apply"} {
+		cmd := NewRootCommand()
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--config", cfgPath, subcommand})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("%s: %v", subcommand, err)
+		}
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("%s exposed private key", subcommand)
+		}
+		if subcommand == "preview" {
+			if !strings.Contains(stdout.String(), "IdentityFile "+keyPath) {
+				t.Fatalf("preview = %q", stdout.String())
+			}
+			if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+				t.Fatalf("preview wrote key: %v", err)
+			}
+		}
+	}
+	data, err := os.ReadFile(keyPath)
+	if err != nil || string(data) != secret {
+		t.Fatalf("managed private key mismatch: %v", err)
+	}
+	info, err := os.Stat(keyPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("managed private key permissions: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("outdated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, subcommand := range []string{"status", "diff"} {
+		cmd := NewRootCommand()
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--config", cfgPath, subcommand})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("%s: %v", subcommand, err)
+		}
+		if !strings.Contains(stdout.String(), "managed private key is missing, outdated") || strings.Contains(stdout.String(), secret) {
+			t.Fatalf("%s output did not report repair safely: %q", subcommand, stdout.String())
+		}
+	}
+	apply := NewRootCommand()
+	apply.SetOut(&bytes.Buffer{})
+	apply.SetErr(&bytes.Buffer{})
+	apply.SetArgs([]string{"--config", cfgPath, "apply"})
+	if err := apply.Execute(); err != nil {
+		t.Fatalf("repair apply: %v", err)
+	}
+	data, err = os.ReadFile(keyPath)
+	if err != nil || string(data) != secret {
+		t.Fatalf("repair did not restore private key: %v", err)
+	}
+	writeFakeBW(t, temp, `[{"id":"legacy-123","type":2,"fields":[{"name":"Legacy SSH","type":2,"value":"false"}]}]`)
+	apply = NewRootCommand()
+	apply.SetOut(&bytes.Buffer{})
+	apply.SetErr(&bytes.Buffer{})
+	apply.SetArgs([]string{"--config", cfgPath, "apply"})
+	if err := apply.Execute(); err != nil {
+		t.Fatalf("apply after unchecking marker: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("unchecked note retained private key: %v", err)
 	}
 }
 

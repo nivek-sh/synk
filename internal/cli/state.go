@@ -14,10 +14,11 @@ import (
 )
 
 type desiredState struct {
-	Entries    []sshconfig.Entry
-	Rendered   string
-	PublicKeys []sshconfig.ManagedPublicKey
-	Warnings   []string
+	Entries     []sshconfig.Entry
+	Rendered    string
+	PublicKeys  []sshconfig.ManagedPublicKey
+	PrivateKeys []sshconfig.ManagedPrivateKey
+	Warnings    []string
 }
 
 type installedState struct {
@@ -33,21 +34,31 @@ type stateChange struct {
 	Detail string
 }
 
-func buildDesiredState(ctx context.Context, cfg config.Config, inReader io.Reader, promptWriter io.Writer) (desiredState, error) {
-	entries, warnings, err := fetchEntries(ctx, cfg, true, inReader, promptWriter)
+func buildDesiredState(ctx context.Context, cfg config.Config, mode syncMode, inReader io.Reader, promptWriter io.Writer) (desiredState, error) {
+	return buildDesiredStateWithModeAndProgress(ctx, cfg, mode, inReader, promptWriter, noopProgress{})
+}
+
+func buildDesiredStateWithProgress(ctx context.Context, cfg config.Config, inReader io.Reader, promptWriter io.Writer, progress progressReporter) (desiredState, error) {
+	return buildDesiredStateWithModeAndProgress(ctx, cfg, syncAlways, inReader, promptWriter, progress)
+}
+
+func buildDesiredStateWithModeAndProgress(ctx context.Context, cfg config.Config, mode syncMode, inReader io.Reader, promptWriter io.Writer, progress progressReporter) (desiredState, error) {
+	entries, warnings, err := fetchEntriesWithProgress(ctx, cfg, mode, inReader, promptWriter, progress)
 	if err != nil {
 		return desiredState{}, err
 	}
-	prepared, keys, keyWarnings, err := sshconfig.PrepareManagedIdentities(entries, cfg.ManagedKeysPath)
+	progress.Update(3, "Generating SSH config")
+	prepared, keys, privateKeys, keyWarnings, err := sshconfig.PrepareManagedIdentities(entries, cfg.ManagedKeysPath)
 	if err != nil {
 		return desiredState{}, err
 	}
 	warnings = append(warnings, keyWarnings...)
 	return desiredState{
-		Entries:    prepared,
-		Rendered:   sshconfig.Render(prepared, cfg.ActiveProfiles),
-		PublicKeys: keys,
-		Warnings:   warnings,
+		Entries:     prepared,
+		Rendered:    sshconfig.Render(prepared, cfg.ActiveProfiles),
+		PublicKeys:  keys,
+		PrivateKeys: privateKeys,
+		Warnings:    warnings,
 	}, nil
 }
 
@@ -85,7 +96,7 @@ func loadInstalledState(path, keyDir string) (installedState, error) {
 	}
 	for _, entry := range keyEntries {
 		name := entry.Name()
-		if !entry.IsDir() && strings.HasPrefix(name, "bw-") && strings.HasSuffix(name, ".pub") {
+		if !entry.IsDir() && strings.HasPrefix(name, "bw-") && (strings.HasSuffix(name, ".pub") || strings.HasSuffix(name, ".key")) {
 			state.ManagedKeyFiles = append(state.ManagedKeyFiles, filepath.Join(keyDir, name))
 		}
 	}
@@ -100,9 +111,14 @@ func compareStates(installed installedState, desired desiredState) []stateChange
 	}
 	desiredByHost := map[string]sshconfig.Entry{}
 	keyByDisplayPath := map[string]sshconfig.ManagedPublicKey{}
+	privateKeyByDisplayPath := map[string]sshconfig.ManagedPrivateKey{}
 	desiredKeyPaths := map[string]bool{}
 	for _, key := range desired.PublicKeys {
 		keyByDisplayPath[key.DisplayPath] = key
+		desiredKeyPaths[key.DisplayPath] = true
+	}
+	for _, key := range desired.PrivateKeys {
+		privateKeyByDisplayPath[key.DisplayPath] = key
 		desiredKeyPaths[key.DisplayPath] = true
 	}
 
@@ -120,7 +136,10 @@ func compareStates(installed installedState, desired desiredState) []stateChange
 		}
 		if identityPath := strings.TrimSpace(entry.Directives["IdentityFile"]); identityPath != "" {
 			if key, managed := keyByDisplayPath[identityPath]; managed && !sshconfig.ManagedPublicKeyCurrent(key) {
-				changes = append(changes, stateChange{Action: "repair-key", Host: entry.Host, Detail: "managed public key is missing or outdated"})
+				changes = append(changes, stateChange{Action: "repair-key", Host: entry.Host, Detail: "managed public key is missing, outdated, or has unsafe permissions"})
+			}
+			if key, managed := privateKeyByDisplayPath[identityPath]; managed && !sshconfig.ManagedPrivateKeyCurrent(key) {
+				changes = append(changes, stateChange{Action: "repair-key", Host: entry.Host, Detail: "managed private key is missing, outdated, or has unsafe permissions"})
 			}
 		}
 	}

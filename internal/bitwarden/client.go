@@ -111,14 +111,14 @@ func (c CLI) ListItems(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
-func (c CLI) ListSSHKeyItems(ctx context.Context) ([]Item, error) {
+func (c CLI) ListSSHItems(ctx context.Context) ([]Item, error) {
 	items, err := c.ListItems(ctx)
 	if err != nil {
 		return nil, err
 	}
 	sshItems := make([]Item, 0, len(items))
 	for _, item := range items {
-		if item.IsSSHKey() {
+		if item.IsSSHKey() || item.IsLegacySSHNote() {
 			sshItems = append(sshItems, item)
 		}
 	}

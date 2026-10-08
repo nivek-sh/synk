@@ -24,6 +24,22 @@ var errNeedsBitwardenUnlock = errors.New("Bitwarden vault is locked")
 
 type rootOptions struct {
 	configPath string
+	forceSync  bool
+}
+
+type syncMode uint8
+
+const (
+	syncNever syncMode = iota
+	syncRecent
+	syncAlways
+)
+
+func (o *rootOptions) readSyncMode() syncMode {
+	if o.forceSync {
+		return syncAlways
+	}
+	return syncRecent
 }
 
 func NewRootCommand() *cobra.Command {
@@ -36,6 +52,7 @@ func NewRootCommand() *cobra.Command {
 		Version:      Version,
 	}
 	cmd.PersistentFlags().StringVar(&opts.configPath, "config", "", "config file path")
+	cmd.PersistentFlags().BoolVar(&opts.forceSync, "force-sync", false, "sync Bitwarden now, even if it synced recently (apply always does)")
 
 	cmd.AddCommand(newInitCommand(opts))
 	cmd.AddCommand(newDoctorCommand(opts))
@@ -179,44 +196,65 @@ func newApplyCommand(opts *rootOptions) *cobra.Command {
 	var dryRun bool
 	var stdout bool
 	var legacySync bool
+	var noProgress bool
 
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Generate the effective OpenSSH config",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			progress := newTerminalProgress(cmd.ErrOrStderr(), 7, noProgress)
+			defer progress.Clear()
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			state, err := buildDesiredState(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr())
+			state, err := buildDesiredStateWithProgress(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr(), progress)
 			if err != nil {
 				return err
 			}
-			printWarnings(state.Warnings, cmd.ErrOrStderr())
+			if len(state.Warnings) > 0 {
+				progress.Suspend()
+				printWarnings(state.Warnings, cmd.ErrOrStderr())
+				progress.Resume()
+			}
 
 			if stdout || dryRun {
+				progress.Suspend()
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning: apply preview flags are deprecated; use `synk preview`")
 				_, err := io.WriteString(cmd.OutOrStdout(), state.Rendered)
 				return err
 			}
 
+			progress.Update(4, "Updating managed public keys")
 			if err := sshconfig.WriteManagedPublicKeys(state.PublicKeys, cfg.ManagedKeysPath); err != nil {
 				return err
 			}
+			progress.Update(5, "Updating managed private keys")
+			if err := sshconfig.WriteManagedPrivateKeys(state.PrivateKeys, cfg.ManagedKeysPath); err != nil {
+				return err
+			}
+			progress.Update(6, "Updating OpenSSH config")
 			if err := sshconfig.WriteManagedConfig(cfg.ManagedConfigPath, state.Rendered); err != nil {
 				return err
 			}
+			progress.Update(7, "Removing stale managed keys")
 			if err := sshconfig.RemoveStaleManagedPublicKeys(state.PublicKeys, cfg.ManagedKeysPath); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", cfg.ManagedConfigPath)
+			if err := sshconfig.RemoveStaleManagedPrivateKeys(state.PrivateKeys, cfg.ManagedKeysPath); err != nil {
+				return err
+			}
+			progress.Done("Applied successfully")
+			fmt.Fprintf(cmd.OutOrStdout(), "managed %s\n", cfg.ManagedConfigPath)
 			fmt.Fprintf(cmd.OutOrStdout(), "managed %d public keys in %s\n", len(state.PublicKeys), cfg.ManagedKeysPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "managed %d legacy private keys in %s\n", len(state.PrivateKeys), cfg.ManagedKeysPath)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&legacySync, "sync", false, "deprecated: apply always syncs Bitwarden")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print generated config without writing files")
 	cmd.Flags().BoolVar(&stdout, "stdout", false, "print generated config without writing files")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "disable the interactive progress bar")
 	_ = cmd.Flags().MarkDeprecated("sync", "apply always syncs Bitwarden")
 	_ = legacySync
 	return cmd
@@ -227,13 +265,17 @@ func newListCommand(opts *rootOptions) *cobra.Command {
 	var legacySync bool
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List desired SSH hosts from a fresh Bitwarden vault",
+		Short: "List desired SSH hosts from Bitwarden",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			rawEntries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			mode := opts.readSyncMode()
+			if legacySync {
+				mode = syncAlways
+			}
+			rawEntries, err := fetchRawEntries(cmd.Context(), cfg, mode, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -260,9 +302,8 @@ func newListCommand(opts *rootOptions) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "include inactive and overridden Bitwarden entries")
-	cmd.Flags().BoolVar(&legacySync, "sync", false, "deprecated: list always syncs Bitwarden")
-	_ = cmd.Flags().MarkDeprecated("sync", "list always syncs Bitwarden")
-	_ = legacySync
+	cmd.Flags().BoolVar(&legacySync, "sync", false, "deprecated: use --force-sync")
+	_ = cmd.Flags().MarkDeprecated("sync", "use --force-sync")
 	return cmd
 }
 
@@ -359,7 +400,7 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			entries, err := fetchRawEntries(cmd.Context(), cfg, opts.readSyncMode(), cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -382,7 +423,11 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			mode := opts.readSyncMode()
+			if statusSync {
+				mode = syncAlways
+			}
+			entries, err := fetchRawEntries(cmd.Context(), cfg, mode, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -390,10 +435,9 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			return nil
 		},
 	}
-	statusCommand.Flags().BoolVar(&statusSync, "sync", false, "deprecated: profile status always syncs Bitwarden")
+	statusCommand.Flags().BoolVar(&statusSync, "sync", false, "deprecated: use --force-sync")
 	statusCommand.Flags().BoolVar(&statusNoColor, "no-color", false, "disable ANSI colors")
-	_ = statusCommand.Flags().MarkDeprecated("sync", "profile status always syncs Bitwarden")
-	_ = statusSync
+	_ = statusCommand.Flags().MarkDeprecated("sync", "use --force-sync")
 	cmd.AddCommand(statusCommand)
 
 	var explainNoColor bool
@@ -406,7 +450,7 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			entries, err := fetchRawEntries(cmd.Context(), cfg, opts.readSyncMode(), cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -431,17 +475,20 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := fetchRawEntries(cmd.Context(), cfg, true, cmd.InOrStdin(), cmd.ErrOrStderr())
+			mode := opts.readSyncMode()
+			if diffSync {
+				mode = syncAlways
+			}
+			entries, err := fetchRawEntries(cmd.Context(), cfg, mode, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			return renderProfileDiff(cmd.OutOrStdout(), entries, cfg.ActiveProfiles, colorMode(shouldUseColor(cmd.OutOrStdout(), diffNoColor)))
 		},
 	}
-	diffCommand.Flags().BoolVar(&diffSync, "sync", false, "deprecated: profile diff always syncs Bitwarden")
+	diffCommand.Flags().BoolVar(&diffSync, "sync", false, "deprecated: use --force-sync")
 	diffCommand.Flags().BoolVar(&diffNoColor, "no-color", false, "disable ANSI colors")
-	_ = diffCommand.Flags().MarkDeprecated("sync", "profile diff always syncs Bitwarden")
-	_ = diffSync
+	_ = diffCommand.Flags().MarkDeprecated("sync", "use --force-sync")
 	cmd.AddCommand(diffCommand)
 
 	var editLocal bool
@@ -452,6 +499,9 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 		Short: "Interactively reorder and enable profiles",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if editNoSync && opts.forceSync {
+				return fmt.Errorf("--no-sync and --force-sync cannot be used together")
+			}
 			cfgPath, err := resolveConfigPath(opts.configPath)
 			if err != nil {
 				return err
@@ -473,7 +523,7 @@ func newProfileCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			next, saved, err := runProfileEditor(cmd.InOrStdin(), cmd.OutOrStdout(), cfg, cfgPath, cache.ToSSHEntries(), cache.UpdatedAt, refreshMode, !editNoSync)
+			next, saved, err := runProfileEditor(cmd.InOrStdin(), cmd.OutOrStdout(), cfg, cfgPath, cache.ToSSHEntries(), cache.UpdatedAt, refreshMode, !editNoSync, opts.forceSync)
 			if err != nil {
 				return err
 			}
@@ -514,7 +564,14 @@ func newCacheCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return refreshProfileCache(cmd.Context(), cfg, !noSync, background, cmd.InOrStdin(), cmd.ErrOrStderr(), cmd.OutOrStdout())
+			if noSync && opts.forceSync {
+				return fmt.Errorf("--no-sync and --force-sync cannot be used together")
+			}
+			mode := opts.readSyncMode()
+			if noSync {
+				mode = syncNever
+			}
+			return refreshProfileCache(cmd.Context(), cfg, mode, background, cmd.InOrStdin(), cmd.ErrOrStderr(), cmd.OutOrStdout())
 		},
 	}
 	refreshCommand.Flags().BoolVar(&background, "background", false, "refresh without prompting and write cache status")
@@ -523,7 +580,7 @@ func newCacheCommand(opts *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func refreshProfileCache(ctx context.Context, cfg config.Config, syncVault bool, background bool, in io.Reader, errOut io.Writer, out io.Writer) error {
+func refreshProfileCache(ctx context.Context, cfg config.Config, mode syncMode, background bool, in io.Reader, errOut io.Writer, out io.Writer) error {
 	startedAt := time.Now()
 	if background {
 		_ = profilecache.SaveStatus("", profilecache.Status{
@@ -536,9 +593,9 @@ func refreshProfileCache(ctx context.Context, cfg config.Config, syncVault bool,
 	var entries []sshconfig.Entry
 	var err error
 	if background {
-		entries, err = fetchRawEntriesNoUnlock(ctx, cfg, syncVault)
+		entries, err = fetchRawEntriesNoUnlock(ctx, cfg, mode)
 	} else {
-		entries, err = fetchRawEntries(ctx, cfg, syncVault, in, errOut)
+		entries, err = fetchRawEntries(ctx, cfg, mode, in, errOut)
 	}
 	if err != nil {
 		if background {
@@ -607,8 +664,12 @@ func updateProfilesE(configPath string, mutate func(*config.Config) error, out i
 	return nil
 }
 
-func fetchEntries(ctx context.Context, cfg config.Config, syncVault bool, in io.Reader, promptOut io.Writer) ([]sshconfig.Entry, []string, error) {
-	rawEntries, err := fetchRawEntries(ctx, cfg, syncVault, in, promptOut)
+func fetchEntries(ctx context.Context, cfg config.Config, mode syncMode, in io.Reader, promptOut io.Writer) ([]sshconfig.Entry, []string, error) {
+	return fetchEntriesWithProgress(ctx, cfg, mode, in, promptOut, noopProgress{})
+}
+
+func fetchEntriesWithProgress(ctx context.Context, cfg config.Config, mode syncMode, in io.Reader, promptOut io.Writer, progress progressReporter) ([]sshconfig.Entry, []string, error) {
+	rawEntries, err := fetchRawEntriesWithProgress(ctx, cfg, mode, in, promptOut, progress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -619,7 +680,12 @@ func fetchEntries(ctx context.Context, cfg config.Config, syncVault bool, in io.
 	return merged.Entries, merged.Warnings, nil
 }
 
-func fetchRawEntries(ctx context.Context, cfg config.Config, syncVault bool, in io.Reader, promptOut io.Writer) ([]sshconfig.Entry, error) {
+func fetchRawEntries(ctx context.Context, cfg config.Config, mode syncMode, in io.Reader, promptOut io.Writer) ([]sshconfig.Entry, error) {
+	return fetchRawEntriesWithProgress(ctx, cfg, mode, in, promptOut, noopProgress{})
+}
+
+func fetchRawEntriesWithProgress(ctx context.Context, cfg config.Config, mode syncMode, in io.Reader, promptOut io.Writer, progress progressReporter) ([]sshconfig.Entry, error) {
+	progress.Update(0, "Checking Bitwarden access")
 	client := bitwarden.NewCLI(cfg.BWPath)
 	cache := bitwarden.DefaultSessionCache()
 	if session, err := cache.Load(); err != nil {
@@ -629,7 +695,7 @@ func fetchRawEntries(ctx context.Context, cfg config.Config, syncVault bool, in 
 	}
 
 	if client.Session != "" || strings.TrimSpace(os.Getenv("BW_SESSION")) != "" {
-		entries, err := fetchRawEntriesWithClient(ctx, client, syncVault)
+		entries, err := fetchRawEntriesWithClientProgress(ctx, client, mode, progress)
 		if err == nil {
 			return entries, nil
 		}
@@ -637,10 +703,14 @@ func fetchRawEntries(ctx context.Context, cfg config.Config, syncVault bool, in 
 			return nil, err
 		}
 		_ = cache.Clear()
+		bitwarden.DefaultSyncCache().Clear()
 		client.Session = ""
 	}
 
-	if err := client.EnsureUnlocked(ctx, in, promptOut); err != nil {
+	progress.Suspend()
+	err := client.EnsureUnlocked(ctx, in, promptOut)
+	progress.Resume()
+	if err != nil {
 		return nil, err
 	}
 	if client.Session != "" {
@@ -648,10 +718,10 @@ func fetchRawEntries(ctx context.Context, cfg config.Config, syncVault bool, in 
 			return nil, err
 		}
 	}
-	return fetchRawEntriesWithClient(ctx, client, syncVault)
+	return fetchRawEntriesWithClientProgress(ctx, client, mode, progress)
 }
 
-func fetchRawEntriesNoUnlock(ctx context.Context, cfg config.Config, syncVault bool) ([]sshconfig.Entry, error) {
+func fetchRawEntriesNoUnlock(ctx context.Context, cfg config.Config, mode syncMode) ([]sshconfig.Entry, error) {
 	client := bitwarden.NewCLI(cfg.BWPath)
 	cache := bitwarden.DefaultSessionCache()
 	if session, err := cache.Load(); err != nil {
@@ -674,10 +744,11 @@ func fetchRawEntriesNoUnlock(ctx context.Context, cfg config.Config, syncVault b
 		}
 	}
 
-	entries, err := fetchRawEntriesWithClient(ctx, client, syncVault)
+	entries, err := fetchRawEntriesWithClient(ctx, client, mode)
 	if err != nil {
 		if bitwarden.LooksLikeSessionError(err) {
 			_ = cache.Clear()
+			bitwarden.DefaultSyncCache().Clear()
 			return nil, errNeedsBitwardenUnlock
 		}
 		return nil, err
@@ -685,17 +756,39 @@ func fetchRawEntriesNoUnlock(ctx context.Context, cfg config.Config, syncVault b
 	return entries, nil
 }
 
-func fetchRawEntriesWithClient(ctx context.Context, client bitwarden.CLI, syncVault bool) ([]sshconfig.Entry, error) {
-	if syncVault {
+func fetchRawEntriesWithClient(ctx context.Context, client bitwarden.CLI, mode syncMode) ([]sshconfig.Entry, error) {
+	return fetchRawEntriesWithClientProgress(ctx, client, mode, noopProgress{})
+}
+
+func fetchRawEntriesWithClientProgress(ctx context.Context, client bitwarden.CLI, mode syncMode, progress progressReporter) ([]sshconfig.Entry, error) {
+	syncCache := bitwarden.DefaultSyncCache()
+	session := client.Session
+	if session == "" {
+		session = strings.TrimSpace(os.Getenv("BW_SESSION"))
+	}
+	shouldSync := mode == syncAlways || mode == syncRecent && !syncCache.Fresh(session, client.Path)
+	if shouldSync {
+		progress.Update(1, "Syncing Bitwarden vault")
 		if err := client.Sync(ctx); err != nil {
+			syncCache.Clear()
 			return nil, err
 		}
 	}
-	items, err := client.ListSSHKeyItems(ctx)
+	progress.Update(2, "Reading Bitwarden SSH items")
+	items, err := client.ListSSHItems(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return bitwarden.ExtractSSHEntries(items)
+	entries, err := bitwarden.ExtractSSHEntries(items)
+	if err != nil {
+		return nil, err
+	}
+	if shouldSync {
+		// This marker is optional. If the runtime directory is unavailable,
+		// subsequent commands simply perform their own sync.
+		_ = syncCache.Save(session, client.Path)
+	}
+	return entries, nil
 }
 
 func resolveConfigPath(path string) (string, error) {

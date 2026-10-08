@@ -18,7 +18,11 @@ type Item struct {
 	SSHKey *SSHKey `json:"sshKey"`
 }
 
-const SSHKeyItemType = 5
+const (
+	SecureNoteItemType = 2
+	SSHKeyItemType     = 5
+	BooleanFieldType   = 2
+)
 
 type Login struct {
 	Username string `json:"username"`
@@ -27,6 +31,7 @@ type Login struct {
 type Field struct {
 	Name  string `json:"name"`
 	Value any    `json:"value"`
+	Type  int    `json:"type"`
 }
 
 type SSHKey struct {
@@ -37,13 +42,20 @@ type SSHKey struct {
 func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 	entries := []sshconfig.Entry{}
 	for _, item := range items {
-		if !item.IsSSHKey() {
+		legacyNote := item.IsLegacySSHNote()
+		if !item.IsSSHKey() && !legacyNote {
 			continue
 		}
 		fields := map[string]string{}
 		hasSSHConfigField := false
+		privateKey := ""
+		var privateKeyValue any
 
 		for _, field := range item.Fields {
+			if legacyNote && strings.TrimSpace(field.Name) == "Private Key" {
+				privateKeyValue = field.Value
+				continue
+			}
 			name, ok := canonicalFieldName(field.Name)
 			if !ok {
 				continue
@@ -61,6 +73,20 @@ func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 		}
 		if !hasSSHConfigField {
 			continue
+		}
+		if legacyNote {
+			value, ok := privateKeyValue.(string)
+			if !ok && privateKeyValue != nil {
+				return nil, fmt.Errorf("legacy SSH note %q: Private Key must be text", itemLabel(item))
+			}
+			privateKey = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+			if privateKey == "" {
+				return nil, fmt.Errorf("legacy SSH note %q is missing required custom field Private Key", itemLabel(item))
+			}
+			if strings.TrimSpace(fields["IdentityFile"]) != "" {
+				return nil, fmt.Errorf("legacy SSH note %q cannot combine Private Key with IdentityFile", itemLabel(item))
+			}
+			privateKey += "\n"
 		}
 
 		host := strings.TrimSpace(fields["Host"])
@@ -81,10 +107,10 @@ func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 		}
 
 		if strings.TrimSpace(directives["User"]) == "" {
-			return nil, fmt.Errorf("SSH key item %q is missing required custom field User", itemLabel(item))
+			return nil, fmt.Errorf("%s %q is missing required custom field User", itemKind(item), itemLabel(item))
 		}
 		if strings.TrimSpace(directives["HostName"]) == "" {
-			return nil, fmt.Errorf("SSH key item %q is missing required custom field HostName", itemLabel(item))
+			return nil, fmt.Errorf("%s %q is missing required custom field HostName", itemKind(item), itemLabel(item))
 		}
 
 		for _, profile := range profiles {
@@ -101,6 +127,7 @@ func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 				SourceID:       strings.TrimSpace(item.ID),
 				Notes:          item.Notes,
 				PublicKey:      publicKey,
+				PrivateKey:     privateKey,
 				KeyFingerprint: fingerprint,
 				Directives:     directives,
 			})
@@ -111,6 +138,36 @@ func ExtractSSHEntries(items []Item) ([]sshconfig.Entry, error) {
 
 func (i Item) IsSSHKey() bool {
 	return i.Type == SSHKeyItemType
+}
+
+func (i Item) IsLegacySSHNote() bool {
+	if i.Type != SecureNoteItemType {
+		return false
+	}
+	for _, field := range i.Fields {
+		if strings.TrimSpace(field.Name) == "Legacy SSH" && field.Type == BooleanFieldType && isTrueValue(field.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTrueValue(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	case bool:
+		return typed
+	default:
+		return false
+	}
+}
+
+func itemKind(item Item) string {
+	if item.IsLegacySSHNote() {
+		return "legacy SSH note"
+	}
+	return "SSH key item"
 }
 
 func canonicalFieldName(name string) (string, bool) {

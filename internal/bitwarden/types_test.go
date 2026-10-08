@@ -1,6 +1,9 @@
 package bitwarden
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExtractSSHEntriesMapsCustomFields(t *testing.T) {
 	items := []Item{
@@ -304,5 +307,87 @@ func TestExtractSSHEntriesIgnoresNonSSHKeyItems(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected non-SSH key item to be ignored, got %d", len(entries))
+	}
+}
+
+func TestExtractSSHEntriesReadsMarkedLegacyNote(t *testing.T) {
+	secret := "-----BEGIN DSA PRIVATE KEY-----\r\nexample\r\n-----END DSA PRIVATE KEY-----"
+	items := []Item{{
+		ID:   "legacy-123",
+		Name: "Old server",
+		Type: SecureNoteItemType,
+		Fields: []Field{
+			{Name: "Legacy SSH", Type: BooleanFieldType, Value: "true"},
+			{Name: "Private Key", Value: secret},
+			{Name: "Enabled", Value: "true"},
+			{Name: "HostName", Value: "old.example.com"},
+			{Name: "User", Value: "deploy"},
+		},
+	}}
+	entries, err := ExtractSSHEntries(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].PrivateKey != strings.ReplaceAll(secret, "\r\n", "\n")+"\n" {
+		t.Fatalf("legacy note was not extracted correctly: entries=%d", len(entries))
+	}
+	if entries[0].SourceID != "legacy-123" || entries[0].Host != "old-server" {
+		t.Fatalf("legacy note metadata = %#v", entries[0])
+	}
+	if _, ok := entries[0].Directives["Private Key"]; ok {
+		t.Fatal("private key entered SSH directives")
+	}
+}
+
+func TestExtractSSHEntriesOnlyUsesCheckedSecureNotes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		item Item
+	}{
+		{name: "unchecked", item: Item{Type: SecureNoteItemType, Fields: []Field{{Name: "Legacy SSH", Type: BooleanFieldType, Value: "false"}}}},
+		{name: "wrong field type", item: Item{Type: SecureNoteItemType, Fields: []Field{{Name: "Legacy SSH", Type: 0, Value: "true"}}}},
+		{name: "wrong item type", item: Item{Type: 1, Fields: []Field{{Name: "Legacy SSH", Type: BooleanFieldType, Value: "true"}}}},
+		{name: "missing marker", item: Item{Type: SecureNoteItemType, Fields: []Field{{Name: "Private Key", Value: "secret"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.item.IsLegacySSHNote() {
+				t.Fatal("unexpected legacy note")
+			}
+			entries, err := ExtractSSHEntries([]Item{tc.item})
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("entries=%d err=%v", len(entries), err)
+			}
+		})
+	}
+}
+
+func TestExtractSSHEntriesLegacyNoteRequiresPrivateKey(t *testing.T) {
+	item := Item{
+		Name: "Old server",
+		Type: SecureNoteItemType,
+		Fields: []Field{
+			{Name: "Legacy SSH", Type: BooleanFieldType, Value: true},
+			{Name: "Enabled", Value: "true"},
+			{Name: "HostName", Value: "old.example.com"},
+			{Name: "User", Value: "deploy"},
+		},
+	}
+	_, err := ExtractSSHEntries([]Item{item})
+	if err == nil || !strings.Contains(err.Error(), "missing required custom field Private Key") {
+		t.Fatalf("error = %v", err)
+	}
+	item.Fields = append(item.Fields, Field{Name: "Private Key", Value: "secret"}, Field{Name: "IdentityFile", Value: "~/.ssh/other"})
+	_, err = ExtractSSHEntries([]Item{item})
+	if err == nil || !strings.Contains(err.Error(), "cannot combine Private Key with IdentityFile") {
+		t.Fatalf("error = %v", err)
+	}
+	item.Fields = []Field{
+		{Name: "Legacy SSH", Type: BooleanFieldType, Value: "true"},
+		{Name: "Enabled", Value: "false"},
+		{Name: "Private Key", Value: true},
+	}
+	entries, err := ExtractSSHEntries([]Item{item})
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("disabled note: entries=%d err=%v", len(entries), err)
 	}
 }

@@ -78,6 +78,23 @@ func TestWriteManagedConfigCreatesPrivateFile(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode = %o, want 600", got)
 	}
+	if err := WriteManagedConfig(path, "Host example\n"); err != nil {
+		t.Fatal(err)
+	}
+	unchangedInfo, err := os.Stat(path)
+	if err != nil || !os.SameFile(info, unchangedInfo) {
+		t.Fatalf("unchanged config was replaced: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedConfig(path, "Host example\n"); err != nil {
+		t.Fatal(err)
+	}
+	repairedInfo, err := os.Stat(path)
+	if err != nil || repairedInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("config permissions were not repaired: %v", err)
+	}
 }
 
 func TestRemoveIncludeIsIdempotentAndPreservesOtherConfig(t *testing.T) {

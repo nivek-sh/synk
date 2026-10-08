@@ -44,14 +44,14 @@ func newShowCommand(opts *rootOptions) *cobra.Command {
 func newPreviewCommand(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "preview",
-		Short: "Sync Bitwarden and show exactly what apply would install",
+		Short: "Show exactly what apply would install from Bitwarden",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			state, err := buildDesiredState(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr())
+			state, err := buildDesiredState(cmd.Context(), cfg, opts.readSyncMode(), cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -65,14 +65,14 @@ func newPreviewCommand(opts *rootOptions) *cobra.Command {
 func newStatusCommand(opts *rootOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Compare a fresh Bitwarden state with the installed config",
+		Short: "Compare Bitwarden state with the installed config",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			desired, err := buildDesiredState(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr())
+			desired, err := buildDesiredState(cmd.Context(), cfg, opts.readSyncMode(), cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -83,7 +83,7 @@ func newStatusCommand(opts *rootOptions) *cobra.Command {
 			printWarnings(desired.Warnings, cmd.ErrOrStderr())
 			changes := compareStates(installed, desired)
 			out := cmd.OutOrStdout()
-			fmt.Fprintln(out, "Bitwarden: synced")
+			fmt.Fprintln(out, "Bitwarden: synced within the last 15 seconds")
 			fmt.Fprintf(out, "Profiles: %s\n", strings.Join(cfg.ActiveProfiles, " -> "))
 			fmt.Fprintf(out, "Installed: %s\n", cfg.ManagedConfigPath)
 			if len(changes) == 0 {
@@ -111,7 +111,7 @@ func newDiffCommand(opts *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			desired, err := buildDesiredState(cmd.Context(), cfg, cmd.InOrStdin(), cmd.ErrOrStderr())
+			desired, err := buildDesiredState(cmd.Context(), cfg, opts.readSyncMode(), cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -135,7 +135,7 @@ func newDiffCommand(opts *rootOptions) *cobra.Command {
 				}
 			}
 			if len(keyChanges) > 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "\n# Managed public keys")
+				fmt.Fprintln(cmd.OutOrStdout(), "\n# Managed keys")
 				for _, change := range keyChanges {
 					fmt.Fprintf(cmd.OutOrStdout(), "! %s: %s\n", change.Host, change.Detail)
 				}
@@ -165,7 +165,7 @@ func newDisableCommand(opts *rootOptions) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "disabled: removed %s\n", result.IncludeLine)
 			fmt.Fprintf(cmd.OutOrStdout(), "backup: %s\n", result.BackupPath)
-			fmt.Fprintln(cmd.OutOrStdout(), "managed config and public keys were retained; run `synk init` to re-enable")
+			fmt.Fprintln(cmd.OutOrStdout(), "managed config and keys were retained; run `synk init` to re-enable")
 			return nil
 		},
 	}
@@ -229,6 +229,9 @@ func entryDestination(entry sshconfig.Entry) string {
 func entryIdentity(entry sshconfig.Entry) string {
 	if strings.TrimSpace(entry.Directives["IdentityFile"]) != "" {
 		return "custom"
+	}
+	if entry.PrivateKey != "" {
+		return "legacy private key"
 	}
 	fingerprint := strings.TrimSpace(entry.KeyFingerprint)
 	if fingerprint == "" {

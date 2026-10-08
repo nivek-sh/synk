@@ -161,6 +161,15 @@ func WriteManagedConfig(path string, content string) error {
 	if err != nil {
 		return err
 	}
+	info, err := os.Lstat(expanded)
+	if err == nil && info.Mode().IsRegular() && info.Mode().Perm() == 0o600 {
+		data, readErr := os.ReadFile(expanded)
+		if readErr == nil && string(data) == content {
+			return nil
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return atomicWrite(expanded, []byte(content), 0o600)
 }
 

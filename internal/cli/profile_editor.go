@@ -42,6 +42,7 @@ type profileEditorModel struct {
 	cfgPath        string
 	refreshMode    string
 	syncVault      bool
+	forceSync      bool
 	order          []string
 	active         map[string]bool
 	cursor         int
@@ -75,7 +76,7 @@ type unlockResultMsg struct {
 	err     error
 }
 
-func runProfileEditor(in io.Reader, out io.Writer, cfg config.Config, cfgPath string, initialEntries []sshconfig.Entry, cacheUpdatedAt time.Time, refreshMode string, syncVault bool) ([]string, bool, error) {
+func runProfileEditor(in io.Reader, out io.Writer, cfg config.Config, cfgPath string, initialEntries []sshconfig.Entry, cacheUpdatedAt time.Time, refreshMode string, syncVault, forceSync bool) ([]string, bool, error) {
 	input, ok := in.(*os.File)
 	if !ok || !term.IsTerminal(int(input.Fd())) {
 		return nil, false, fmt.Errorf("profile edit requires an interactive terminal")
@@ -85,7 +86,7 @@ func runProfileEditor(in io.Reader, out io.Writer, cfg config.Config, cfgPath st
 		return nil, false, fmt.Errorf("profile edit requires an interactive terminal")
 	}
 
-	model := newProfileEditorModel(cfg, cfgPath, initialEntries, cacheUpdatedAt, refreshMode, syncVault)
+	model := newProfileEditorModel(cfg, cfgPath, initialEntries, cacheUpdatedAt, refreshMode, syncVault, forceSync)
 	program := tea.NewProgram(model, tea.WithInput(input), tea.WithOutput(output), tea.WithAltScreen())
 	result, err := program.Run()
 	if err != nil {
@@ -101,7 +102,7 @@ func runProfileEditor(in io.Reader, out io.Writer, cfg config.Config, cfgPath st
 	return activeProfilesFromEditorOrder(finalModel.order, finalModel.active), finalModel.saved, nil
 }
 
-func newProfileEditorModel(cfg config.Config, cfgPath string, entries []sshconfig.Entry, cacheUpdatedAt time.Time, refreshMode string, syncVault bool) profileEditorModel {
+func newProfileEditorModel(cfg config.Config, cfgPath string, entries []sshconfig.Entry, cacheUpdatedAt time.Time, refreshMode string, syncVault, forceSync bool) profileEditorModel {
 	refreshMode = normalizeEditorRefresh(refreshMode)
 	activeProfiles := config.NormalizeProfiles(cfg.ActiveProfiles)
 	active := map[string]bool{}
@@ -115,6 +116,7 @@ func newProfileEditorModel(cfg config.Config, cfgPath string, entries []sshconfi
 		cfgPath:        cfgPath,
 		refreshMode:    refreshMode,
 		syncVault:      syncVault,
+		forceSync:      forceSync,
 		order:          profileOrderWithDiscovered(activeProfiles, entries),
 		active:         active,
 		entries:        entries,
@@ -441,6 +443,7 @@ func (m profileEditorModel) checkRefreshCmd() tea.Cmd {
 func (m profileEditorModel) launchRefreshCmd(session string) tea.Cmd {
 	cfgPath := m.cfgPath
 	syncVault := m.syncVault
+	forceSync := m.forceSync
 	return func() tea.Msg {
 		startedAt := time.Now()
 		executable, err := os.Executable()
@@ -454,6 +457,8 @@ func (m profileEditorModel) launchRefreshCmd(session string) tea.Cmd {
 		args = append(args, "cache", "refresh", "--background")
 		if !syncVault {
 			args = append(args, "--no-sync")
+		} else if forceSync {
+			args = append(args, "--force-sync")
 		}
 
 		cmd := exec.Command(executable, args...)

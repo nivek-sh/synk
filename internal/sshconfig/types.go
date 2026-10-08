@@ -7,6 +7,7 @@ type Entry struct {
 	SourceID       string
 	Notes          string
 	PublicKey      string
+	PrivateKey     string
 	KeyFingerprint string
 	Directives     map[string]string
 }
