@@ -23,13 +23,13 @@
         {
           default = pkgs.buildGoModule {
             pname = "synk";
-            version = "0.4.1";
+            version = "0.4.2";
             src = ./.;
             vendorHash = "sha256-z7GPdpqPK/DGMzkM6xAWa+NaJMwsDMF0XSWtP8wg5GQ=";
             ldflags = [
               "-s"
               "-w"
-              "-X synk/internal/cli.Version=0.4.1"
+              "-X synk/internal/cli.Version=0.4.2"
             ];
           };
         });

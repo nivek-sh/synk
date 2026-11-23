@@ -110,8 +110,8 @@ install from the archive into a custom directory on any platform. Run
 Run or install a pinned release directly from its Git tag:
 
 ```sh
-nix run github:nivek-sh/synk/v0.4.1 -- --version
-nix profile install github:nivek-sh/synk/v0.4.1
+nix run github:nivek-sh/synk/v0.4.2 -- --version
+nix profile install github:nivek-sh/synk/v0.4.2
 ```
 
 ## How it works
@@ -466,9 +466,9 @@ Before tagging, update both version occurrences in `flake.nix` and `pkgver` in
 ```sh
 git add -A
 just check
-git commit -m "fix: release v0.4.1"
-git tag -a v0.4.1 -m "synk v0.4.1"
-git push --atomic origin master v0.4.1
+git commit -m "fix: release v0.4.2"
+git tag -a v0.4.2 -m "synk v0.4.2"
+git push --atomic origin master v0.4.2
 ```
 
 The tag, `flake.nix`, and the AUR template must declare the same version or the

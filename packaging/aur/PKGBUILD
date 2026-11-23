@@ -1,6 +1,6 @@
 # Maintainer: NivekNK <79262770+NivekNK@users.noreply.github.com>
 pkgname=synk
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc='Generate OpenSSH config from Bitwarden profiles'
 arch=('x86_64' 'aarch64')
