@@ -76,7 +76,7 @@ jobs:
           go test ./...
           go vet ./...
 
-      - name: Build release archives
+      - name: Build release artifacts
         shell: bash
         run: |
           automation/scripts/release/build-release.sh \
@@ -84,6 +84,15 @@ jobs:
             "$GITHUB_WORKSPACE/automation/scripts/release/install.sh" \
             "$RUNNER_TEMP/release" \
             "$RELEASE_TAG"
+
+      - name: Verify Ubuntu package installation
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        shell: bash
+        run: |
+          SYNK_DOWNLOAD_BASE_URL="file://$RUNNER_TEMP/release" \
+            bash "$RUNNER_TEMP/release/install.sh" --no-bw
+          test "$(/usr/bin/synk --version)" = "synk version $RELEASE_VERSION"
 
       - name: Publish GitHub release
         env:

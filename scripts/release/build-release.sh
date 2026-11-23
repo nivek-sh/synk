@@ -26,7 +26,7 @@ version="${tag#v}"
   exit 1
 }
 
-for command_name in git go tar gzip sha256sum; do
+for command_name in git go tar gzip sha256sum dpkg-deb; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'required command not found: %s\n' "$command_name" >&2
     exit 1
@@ -125,6 +125,28 @@ for target in "${targets[@]}"; do
     -C "$work_dir" \
     -czf "$dist_dir/$archive_root.tar.gz" \
     "$archive_root"
+
+  if [[ "$goos" == linux ]]; then
+    package_dir="$work_dir/synk_${version}_${goarch}"
+    mkdir -p -- "$package_dir/DEBIAN"
+    install -Dm755 "$stage_dir/synk" "$package_dir/usr/bin/synk"
+    install -Dm644 "$source_dir/LICENSE" "$package_dir/usr/share/doc/synk/copyright"
+    cat >"$package_dir/DEBIAN/control" <<EOF
+Package: synk
+Version: $version
+Architecture: $goarch
+Maintainer: NivekNK <79262770+NivekNK@users.noreply.github.com>
+Section: net
+Priority: optional
+Depends: openssh-client
+Homepage: https://github.com/nivek-sh/synk
+Description: Generate OpenSSH config from Bitwarden profiles
+ Synk generates a single effective SSH configuration from ordered profiles.
+ Install the Bitwarden CLI (bw) separately to read vault items.
+EOF
+    SOURCE_DATE_EPOCH="$source_date_epoch" dpkg-deb --root-owner-group -Zxz \
+      --build "$package_dir" "$dist_dir/${package_dir##*/}.deb"
+  fi
 done
 
 git -C "$source_dir" archive \
@@ -137,7 +159,7 @@ install -m 0755 "$release_installer" "$dist_dir/install.sh"
 
 (
   cd -- "$dist_dir"
-  sha256sum ./*.tar.gz ./install.sh | sed 's|  \./|  |' >SHA256SUMS
+  sha256sum ./*.tar.gz ./*.deb ./install.sh | sed 's|  \./|  |' >SHA256SUMS
 )
 
 printf 'release artifacts written to %s\n' "$dist_dir"

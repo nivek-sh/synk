@@ -12,13 +12,60 @@ Status: early development.
 Runtime dependencies are the Bitwarden CLI (`bw`) and the OpenSSH client
 (`ssh`).
 
+### Ubuntu
+
+The recommended option is the [release installer](#github-release-installer).
+On Ubuntu, it downloads and verifies the `.deb` for your architecture and
+installs it with APT. APT handles `openssh-client`, and the installer tries to
+install Bitwarden CLI if it is missing. Run the installer as your regular user.
+It uses `sudo` for APT and can install `bw` with npm in your home directory.
+
+For manual installation, download the `.deb` matching `dpkg --print-architecture`
+(`amd64` or `arm64`) from the
+[GitHub release](https://github.com/nivek-sh/synk/releases/latest). In the download
+directory, replace `VERSION` with the version in the filename and run:
+
+```sh
+sudo apt install "./synk_VERSION_$(dpkg --print-architecture).deb"
+synk --version
+```
+
+If you installed the `.deb` manually, install `bw` separately with
+`sudo snap install bw` on Ubuntu with Snap enabled, or with
+`npm install -g @bitwarden/cli` if you have Node.js and npm. Bitwarden recommends
+npm on ARM64 in its [CLI installation guide](https://bitwarden.com/help/cli/).
+Check that `bw --version` works, then run as your regular user:
+
+```sh
+bw login
+synk init
+synk doctor
+```
+
+If you already have a Synk-managed config that contains `UseKeychain`, run
+`synk apply` to regenerate it for Ubuntu.
+
+For native Bitwarden SSH key items, enable the SSH agent in the Bitwarden
+desktop app and set `SSH_AUTH_SOCK` to its socket. Follow the
+[Bitwarden SSH agent instructions for Linux](https://bitwarden.com/help/ssh-agent/)
+to locate the socket for your installation and check it with `ssh-add -L`.
+
+To install from this checkout before a GitHub release is available, run the
+following from the repository root with the Go toolchain specified in `go.mod`:
+
+```sh
+GOBIN="$HOME/.local/bin" go install ./cmd/synk
+export PATH="$HOME/.local/bin:$PATH"
+synk --version
+```
+
 ### Arch Linux (AUR)
 
 ```sh
 paru -S synk
 ```
 
-### GitHub release archive
+### GitHub release installer
 
 Download the archive for your platform from the
 [latest GitHub release](https://github.com/nivek-sh/synk/releases/latest):
@@ -26,27 +73,37 @@ Download the archive for your platform from the
 - `linux-x86_64` or `linux-arm64`
 - `macos-x86_64` or `macos-arm64`
 
-The standalone `install.sh` asset detects the current platform, downloads the
-matching archive from that release, verifies it against `SHA256SUMS`, and
-installs it:
+The standalone `install.sh` asset detects the platform and verifies the `.deb`
+or archive against `SHA256SUMS` before installing it:
 
 ```sh
 curl -fsSLO https://github.com/nivek-sh/synk/releases/latest/download/install.sh
 bash install.sh
 ```
 
-The same installer is also bundled inside every platform archive, so the
-download can be inspected and installed entirely offline after extraction.
+On Linux, the installer checks for `bw` in `PATH`, `/snap/bin`, and
+`~/.local/bin` before trying to install it. It tries Snap first on x86-64
+and npm first on ARM64, then tries the other method if needed.
+Use `--with-bw=snap` or `--with-bw=npm` to select
+a single method, or `--no-bw` to install only Synk. Snap requires `snapd`
+and may prompt for `sudo`.
+The npm option requires Node.js and npm and installs to `~/.local/bin` when
+run as your regular user. If `bw` cannot be installed, Synk remains installed
+and the installer prints the missing requirements or the installation error.
 
-The default destination is `~/.local/bin`. For a system-wide installation:
+The same installer is bundled inside every platform archive. After extraction,
+run `bash install.sh --no-bw` for an offline installation.
+
+Archive installations default to `~/.local/bin`. For a system-wide archive
+installation outside Ubuntu:
 
 ```sh
-sudo ./install.sh --system
+sudo bash install.sh --system
 ```
 
-Use `./install.sh --dir PATH` or `SYNK_INSTALL_DIR=PATH ./install.sh` for a
-custom destination. The installer only copies the bundled `synk` binary; it
-does not modify SSH configuration. Run `synk init` explicitly when ready.
+Use `bash install.sh --dir PATH` or `SYNK_INSTALL_DIR=PATH bash install.sh` to
+install from the archive into a custom directory on any platform. Run
+`synk init` when ready to configure SSH.
 
 ### Nix
 
@@ -97,7 +154,7 @@ set `IdentityFile` on a legacy SSH note: `synk` creates the identity file from
 | `ServerAliveInterval` | no | Keepalive interval in seconds |
 | `ServerAliveCountMax` | no | Keepalive failure threshold |
 | `AddKeysToAgent` | no | Ask OpenSSH to add keys to the agent |
-| `UseKeychain` | no | macOS OpenSSH keychain integration |
+| `UseKeychain` | no | macOS OpenSSH keychain integration. Synk omits it from generated configuration on Linux |
 
 Examples:
 
@@ -393,11 +450,13 @@ Nix can see the Go sources.
 The `Release` GitHub Actions workflow runs for stable tags matching
 `vMAJOR.MINOR.PATCH`. It:
 
-1. runs all Go tests and `go vet`;
-2. builds Linux and macOS archives for x86-64 and ARM64;
+1. runs all Go tests and `go vet`
+2. builds Linux and macOS archives for x86-64 and ARM64, plus `.deb` packages
+   for Ubuntu on amd64 and arm64
 3. creates a deterministic source archive, standalone installer, and
-   `SHA256SUMS`;
-4. creates a GitHub Release with generated release notes;
+   `SHA256SUMS` covering both archives and packages
+4. tests installation of the native `.deb` on the Ubuntu runner and publishes
+   the assets on GitHub Releases
 5. validates the AUR package in an Arch Linux container and pushes its updated
    `PKGBUILD` and `.SRCINFO`.
 

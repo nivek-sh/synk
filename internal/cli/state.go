@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -51,6 +52,11 @@ func buildDesiredStateWithModeAndProgress(ctx context.Context, cfg config.Config
 	prepared, keys, privateKeys, keyWarnings, err := sshconfig.PrepareManagedIdentities(entries, cfg.ManagedKeysPath)
 	if err != nil {
 		return desiredState{}, err
+	}
+	if runtime.GOOS == "linux" {
+		for _, entry := range prepared {
+			delete(entry.Directives, "UseKeychain")
+		}
 	}
 	warnings = append(warnings, keyWarnings...)
 	return desiredState{

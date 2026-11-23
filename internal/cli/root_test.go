@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,7 +38,8 @@ func TestApplyStdoutUsesFakeBW(t *testing.T) {
       {"name": "Host", "value": "github.com"},
       {"name": "Profiles", "value": "pro"},
       {"name": "HostName", "value": "ssh.github.com"},
-      {"name": "User", "value": "git"}
+      {"name": "User", "value": "git"},
+      {"name": "UseKeychain", "value": "yes"}
     ],
     "sshKey": {"publicKey": "ssh-ed25519 AAAA github"}
   }
@@ -74,6 +76,9 @@ func TestApplyStdoutUsesFakeBW(t *testing.T) {
 	}
 	if !strings.Contains(output, "IdentitiesOnly yes") {
 		t.Fatalf("managed Bitwarden identity should be exclusive:\n%s", output)
+	}
+	if got, want := strings.Contains(output, "    UseKeychain yes\n"), runtime.GOOS != "linux"; got != want {
+		t.Fatalf("UseKeychain present = %t on %s, want %t:\n%s", got, runtime.GOOS, want, output)
 	}
 }
 
