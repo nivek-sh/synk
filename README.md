@@ -110,9 +110,26 @@ install from the archive into a custom directory on any platform. Run
 Run or install a pinned release directly from its Git tag:
 
 ```sh
-nix run github:nivek-sh/synk/v0.4.2 -- --version
-nix profile install github:nivek-sh/synk/v0.4.2
+nix run github:nivek-sh/synk/v0.5.0 -- --version
+nix profile install github:nivek-sh/synk/v0.5.0
 ```
+
+### Updating
+
+```sh
+synk update
+```
+
+Synk checks which installation owns the running executable. For the Ubuntu
+package, it verifies the latest release's `.deb` checksum and installs the
+package with APT. For AUR it uses `paru` or `yay`. For a GitHub release archive,
+it verifies the download and updates the binary in its current directory.
+APT and system-wide archive updates may ask for `sudo`.
+
+For an unpinned entry in the current Nix profile, it uses `nix profile upgrade`
+on the matching entry. For a pinned release or a declarative Nix installation,
+update the version in the install reference or configuration. For source
+builds, pull the updated checkout and reinstall from it.
 
 ## How it works
 
@@ -466,9 +483,9 @@ Before tagging, update both version occurrences in `flake.nix` and `pkgver` in
 ```sh
 git add -A
 just check
-git commit -m "fix: release v0.4.2"
-git tag -a v0.4.2 -m "synk v0.4.2"
-git push --atomic origin master v0.4.2
+git commit -m "fix: release v0.5.0"
+git tag -a v0.5.0 -m "synk v0.5.0"
+git push --atomic origin master v0.5.0
 ```
 
 The tag, `flake.nix`, and the AUR template must declare the same version or the
